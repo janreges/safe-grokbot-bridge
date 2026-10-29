@@ -7,4 +7,7 @@
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod exec;
+pub mod files;
+pub mod git;
 pub mod paths;

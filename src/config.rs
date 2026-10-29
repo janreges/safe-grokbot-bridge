@@ -313,19 +313,35 @@ pub struct Workspace {
     pub allow: BTreeSet<Capability>,
     pub agents: Vec<String>,
     pub allow_bypass_permissions: bool,
-    deny_names: GlobSet,
-    deny_paths: GlobSet,
+    pub deny: DenyRules,
 }
 
 impl Workspace {
-    /// Whether a path relative to the workspace root matches a deny pattern. Patterns without
-    /// `/` are checked against every path component, patterns with `/` against the whole path.
+    /// Whether a path relative to the workspace root matches a deny pattern.
     pub fn is_denied(&self, rel: &Path) -> bool {
+        self.deny.matches(rel)
+    }
+
+    pub fn allows(&self, capability: Capability) -> bool {
+        self.allow.contains(&capability)
+    }
+}
+
+/// Compiled deny patterns. Patterns without `/` are checked against every path component,
+/// patterns with `/` against the whole path relative to the workspace root.
+#[derive(Debug, Clone)]
+pub struct DenyRules {
+    names: GlobSet,
+    paths: GlobSet,
+}
+
+impl DenyRules {
+    pub fn matches(&self, rel: &Path) -> bool {
         let mut joined = String::new();
         for component in rel.components() {
             if let Component::Normal(name) = component {
                 let name = name.to_string_lossy();
-                if self.deny_names.is_match(name.as_ref()) {
+                if self.names.is_match(name.as_ref()) {
                     return true;
                 }
                 if !joined.is_empty() {
@@ -334,11 +350,7 @@ impl Workspace {
                 joined.push_str(&name);
             }
         }
-        !joined.is_empty() && self.deny_paths.is_match(&joined)
-    }
-
-    pub fn allows(&self, capability: Capability) -> bool {
-        self.allow.contains(&capability)
+        !joined.is_empty() && self.paths.is_match(&joined)
     }
 }
 
@@ -572,7 +584,7 @@ fn resolve_workspaces(raw: Vec<RawWorkspace>, agents: &[Agent]) -> Result<Vec<Wo
             }
             None => agents.iter().map(|a| a.name.clone()).collect(),
         };
-        let (deny_names, deny_paths) = build_deny(&ws.deny)
+        let deny = build_deny(&ws.deny)
             .with_context(|| format!("[[workspaces]] `{name}`: invalid deny pattern"))?;
         workspaces.push(Workspace {
             name,
@@ -580,14 +592,13 @@ fn resolve_workspaces(raw: Vec<RawWorkspace>, agents: &[Agent]) -> Result<Vec<Wo
             allow,
             agents: ws_agents,
             allow_bypass_permissions: ws.allow_bypass_permissions,
-            deny_names,
-            deny_paths,
+            deny,
         });
     }
     Ok(workspaces)
 }
 
-fn build_deny(extra: &[String]) -> Result<(GlobSet, GlobSet)> {
+fn build_deny(extra: &[String]) -> Result<DenyRules> {
     let mut names = GlobSetBuilder::new();
     let mut paths = GlobSetBuilder::new();
     for pattern in DEFAULT_DENY
@@ -610,7 +621,10 @@ fn build_deny(extra: &[String]) -> Result<(GlobSet, GlobSet)> {
             names.add(glob);
         }
     }
-    Ok((names.build()?, paths.build()?))
+    Ok(DenyRules {
+        names: names.build()?,
+        paths: paths.build()?,
+    })
 }
 
 pub fn default_config_path() -> PathBuf {
