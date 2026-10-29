@@ -1,9 +1,7 @@
-//! safe-grokbot-bridge: a secure HTTP bridge between a remote AI agent and the coding agents
-//! running on this machine. See `docs/design.md` for the architecture.
-
-mod auth;
+//! Command-line entry point of safe-grokbot-bridge.
 
 use clap::{Parser, Subcommand};
+use safe_grokbot_bridge::auth;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
