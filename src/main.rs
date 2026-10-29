@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use safe_grokbot_bridge::config::{self, Config};
-use safe_grokbot_bridge::{api, auth, server};
+use safe_grokbot_bridge::{api, auth, hook, server};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -41,12 +41,28 @@ enum Command {
     },
     /// Print the OpenAPI document of the HTTP API.
     Openapi,
+    /// Record a turn-complete event (called by agent hooks, not by people).
+    #[command(hide = true)]
+    Hook {
+        agent: String,
+        file: PathBuf,
+        /// Event payload (Codex passes it as an argument; Claude Code on stdin).
+        payload: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Serve(args) => serve(&args.path()),
         Command::Token { name } => token(&name),
+        Command::Hook {
+            agent,
+            file,
+            payload,
+        } => {
+            hook::run_cli(&agent, &file, payload);
+            Ok(())
+        }
         Command::Openapi => {
             println!("{}", api::openapi().to_pretty_json()?);
             Ok(())
