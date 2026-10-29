@@ -310,3 +310,51 @@ mod tests {
         assert_eq!(auth.client_ip(local, &headers).to_string(), "127.0.0.1");
     }
 }
+
+/// Who made a request; inserted into request extensions by [`middleware`].
+#[derive(Clone, Debug)]
+pub struct Caller {
+    pub token: String,
+    pub ip: IpAddr,
+}
+
+/// Authenticates every request that reaches the API routes and writes the audit log line.
+pub async fn middleware(
+    axum::extract::State(app): axum::extract::State<crate::server::AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let ip = app.auth.client_ip(peer, request.headers());
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+    let authorization = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    let token = match app.auth.check(ip, authorization, Instant::now()) {
+        Ok(token) => token,
+        Err(err) => {
+            tracing::warn!(%ip, %method, path = uri.path(), code = err.code, "request rejected");
+            return err.into_response();
+        }
+    };
+    request.extensions_mut().insert(Caller {
+        token: token.clone(),
+        ip,
+    });
+    let started = Instant::now();
+    let response = next.run(request).await;
+    tracing::info!(
+        token,
+        %ip,
+        %method,
+        uri = %uri,
+        status = response.status().as_u16(),
+        ms = started.elapsed().as_millis() as u64,
+        "request"
+    );
+    response
+}
