@@ -1478,8 +1478,28 @@ impl Sessions {
     /// A DELETE that came while the session was starting found no tmux session to stop; the one
     /// created since must not keep running.
     async fn stopped_while_starting(&self, record: &Record) -> ApiError {
-        if let Some(tmux) = &self.tmux {
-            let _ = tmux.kill_session(&record.id).await;
+        let Some(tmux) = &self.tmux else {
+            return ApiError::internal("tmux is not available");
+        };
+        if let Err(err) = tmux.kill_session(&record.id).await {
+            let gone = tmux
+                .list_panes()
+                .await
+                .is_ok_and(|panes| !panes.iter().any(|p| p.session == record.id));
+            if !gone {
+                // Still running: list it again, so that it can be stopped once more.
+                let mut state = record.state();
+                state.phase = Phase::Idle;
+                state.ended_at = None;
+                return ApiError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "stop_failed",
+                    format!(
+                        "Session `{}` was stopped while it was starting, but its tmux session could not be closed ({err:#}). It is listed again; stop it with DELETE.",
+                        record.id
+                    ),
+                );
+            }
         }
         ApiError::conflict(
             "ended",
