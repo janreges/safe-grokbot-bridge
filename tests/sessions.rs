@@ -77,6 +77,12 @@ async fn headless_sessions_answer_and_continue_the_conversation() {
     assert_eq!(done["state"], "idle", "{done}");
     assert_eq!(done["last_message"], "echo: hello");
     let session_id = done["agent_session_id"].as_str().unwrap().to_string();
+    // The resume command shown to clients leaves out configured variables, which may be secrets.
+    let resume = done["attach_command"].as_str().unwrap();
+    assert!(
+        resume.contains(&session_id) && !resume.contains("ARGS_LOG"),
+        "{resume}"
+    );
     assert_eq!(session_id.len(), 36, "a --session-id UUID");
 
     let (status, _) = h
@@ -218,6 +224,7 @@ async fn keep_alive_false_finishes_after_the_first_answer_and_stop_kills_a_turn(
 fn alive(pid: &str) -> bool {
     std::process::Command::new("kill")
         .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
 }

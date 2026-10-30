@@ -242,7 +242,7 @@ pub fn claude_last_message(
 // Codex
 // ---------------------------------------------------------------------------------------------
 
-/// A live interactive Codex session and the thread it most likely runs.
+/// A live interactive Codex session and the thread it runs.
 #[derive(Debug, Clone)]
 pub struct CodexThread {
     pub id: String,
@@ -250,7 +250,8 @@ pub struct CodexThread {
     pub home: PathBuf,
     pub pid: u32,
     pub rollout: PathBuf,
-    /// Several Codex sessions run in the same folder, so the thread may belong to another one.
+    /// The thread is a guess that may belong to another session: the process does not name it,
+    /// and several Codex sessions or recent conversations share the folder.
     pub ambiguous: bool,
 }
 
@@ -326,16 +327,16 @@ pub fn codex_threads(snapshot: &Snapshot, codex_command: &str) -> Vec<CodexThrea
     }
     let mut threads = Vec::new();
     for ((home, cwd), processes) in groups {
-        let ambiguous = processes.len() > 1;
+        let shared = processes.len() > 1;
         for process in processes {
-            if let Some((id, rollout)) = rollout_of(&home, &cwd, process) {
+            if let Some(found) = rollout_of(snapshot, &home, &cwd, process) {
                 threads.push(CodexThread {
-                    id,
+                    id: found.id,
                     cwd: cwd.clone(),
                     home: home.clone(),
                     pid: process.pid,
-                    rollout,
-                    ambiguous,
+                    rollout: found.path,
+                    ambiguous: !found.exact && (shared || found.candidates > 1),
                 });
             }
         }
@@ -380,31 +381,103 @@ pub async fn hermes_session_cwd(agent: &Agent, session_id: &str) -> Option<PathB
     record["cwd"].as_str().map(PathBuf::from)
 }
 
-/// The rollout (thread) a live Codex process works on, as `(thread id, path)`: the thread named
-/// by `codex resume <id>`, or else the newest interactive thread in `cwd` that started after the
-/// process. A process that has not started a thread yet has none, and neither has one that
-/// resumed a conversation held in another folder: its history belongs to that folder.
-fn rollout_of(home: &Path, cwd: &Path, process: &ProcInfo) -> Option<(String, PathBuf)> {
+/// The thread a live Codex process works on.
+struct Rollout {
+    id: String,
+    path: PathBuf,
+    /// The process itself names the thread: a rollout file it keeps open, or `codex resume`.
+    exact: bool,
+    /// Threads that fit when the process does not name one.
+    candidates: usize,
+}
+
+/// The rollout (thread) a live Codex process works on. Where open files can be read (Linux), it
+/// is the newest terminal thread among the rollouts the process keeps open; a process without
+/// one has not started a thread yet. Elsewhere it is the thread named by `codex resume <id>`, or
+/// a guess: the newest terminal thread (not a `codex exec` run or a subagent's thread) in `cwd`
+/// that started after the process. A thread held in another folder never counts, because its
+/// history belongs to that folder.
+fn rollout_of(snapshot: &Snapshot, home: &Path, cwd: &Path, process: &ProcInfo) -> Option<Rollout> {
+    let usable = |path: PathBuf| {
+        let meta = rollout_meta(&path)?;
+        let in_cwd = dunce::canonicalize(&meta.cwd)
+            .map(|c| c == cwd)
+            .unwrap_or(meta.cwd == cwd);
+        (meta.interactive && in_cwd).then_some((meta, path))
+    };
+    if let Some(open) = open_rollouts(snapshot, process.pid, home) {
+        let (meta, path) = open
+            .into_iter()
+            .filter_map(usable)
+            .max_by_key(|(meta, _)| meta.started)?;
+        return Some(Rollout {
+            id: meta.id,
+            path,
+            exact: true,
+            candidates: 1,
+        });
+    }
     let resumed = process
         .cmd
         .iter()
         .skip_while(|arg| arg.as_str() != "resume")
         .nth(1)
         .filter(|id| !id.starts_with('-'));
+    if let Some(id) = resumed {
+        let (meta, path) = recent_rollouts(home)
+            .into_iter()
+            .filter_map(usable)
+            .find(|(meta, _)| &meta.id == id)?;
+        return Some(Rollout {
+            id: meta.id,
+            path,
+            exact: true,
+            candidates: 1,
+        });
+    }
     let started = std::time::UNIX_EPOCH
         + std::time::Duration::from_secs(process.start_time.saturating_sub(5));
-    recent_rollouts(home).into_iter().find_map(|path| {
-        let meta = rollout_meta(&path)?;
-        let same_dir = dunce::canonicalize(&meta.cwd)
-            .map(|c| c == cwd)
-            .unwrap_or(meta.cwd == cwd);
-        let matches = same_dir
-            && match resumed {
-                Some(id) => &meta.id == id,
-                None => meta.interactive && meta.started.is_some_and(|at| at >= started),
-            };
-        matches.then_some((meta.id, path))
+    let candidates: Vec<(RolloutMeta, PathBuf)> = recent_rollouts(home)
+        .into_iter()
+        .filter_map(usable)
+        .filter(|(meta, _)| meta.started.is_some_and(|at| at >= started))
+        .collect();
+    let count = candidates.len();
+    let (meta, path) = candidates.into_iter().next()?;
+    Some(Rollout {
+        id: meta.id,
+        path,
+        exact: false,
+        candidates: count,
     })
+}
+
+/// Rollout files that a process or its children keep open, or `None` where open files cannot be
+/// read (outside Linux). The native Codex binary keeps the rollouts of its thread and of its
+/// subagents open while it runs.
+fn open_rollouts(snapshot: &Snapshot, pid: u32, home: &Path) -> Option<Vec<PathBuf>> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let sessions = dunce::canonicalize(home.join("sessions")).ok()?;
+    let mut readable = false;
+    let mut found = Vec::new();
+    for process in snapshot.tree(pid, 4) {
+        let Ok(fds) = std::fs::read_dir(format!("/proc/{}/fd", process.pid)) else {
+            continue;
+        };
+        readable = true;
+        for fd in fds.flatten() {
+            if let Ok(target) = std::fs::read_link(fd.path())
+                && target.starts_with(&sessions)
+                && target.extension().is_some_and(|e| e == "jsonl")
+                && !found.contains(&target)
+            {
+                found.push(target);
+            }
+        }
+    }
+    readable.then_some(found)
 }
 
 /// Rollout files of the last two weeks, newest first.
@@ -546,7 +619,8 @@ pub async fn codex_queue(agent: &Agent, home: &Path, thread: &str, text: &str) -
     scrub_env(&mut cmd);
     cmd.envs(agent.env.iter().map(|(k, v)| (k, v)))
         .env("CODEX_HOME", home)
-        .args(["queue", "--thread", thread, "--message", text]);
+        // One argument, so that a message starting with `-` cannot be read as an option.
+        .args(["queue", "--thread", thread, &format!("--message={text}")]);
     let out = exec::run(cmd, None, Duration::from_secs(30), 64 * 1024).await?;
     if !out.success() {
         bail!("`codex queue` failed: {}", out.stderr.trim());
@@ -679,27 +753,34 @@ mod tests {
             cwd: Some(cwd.clone()),
             environ: vec![],
         };
+        // Processes that are not in the snapshot have no readable open files, so these cases
+        // exercise the matching used outside Linux.
+        let none = Snapshot::default();
+        let found = |cwd: &Path, process: &ProcInfo| {
+            rollout_of(&none, home.path(), cwd, process)
+                .map(|r| (r.id, r.path, r.exact, r.candidates))
+        };
         // 2026-10-30T07:59:00Z: the thread started after the process did.
         let fresh = process(1_793_347_140, &["codex"]);
         assert_eq!(
-            rollout_of(home.path(), &cwd, &fresh),
-            Some(("t-1".into(), rollout.clone()))
+            found(&cwd, &fresh),
+            Some(("t-1".into(), rollout.clone(), false, 1))
         );
         // A process started after the thread has not created its own thread yet.
         let later = process(1_793_347_500, &["codex"]);
-        assert_eq!(rollout_of(home.path(), &cwd, &later), None);
+        assert_eq!(found(&cwd, &later), None);
         // `codex resume <id>` names its thread.
         let resumed = process(1_793_347_500, &["codex", "resume", "t-1"]);
         assert_eq!(
-            rollout_of(home.path(), &cwd, &resumed),
-            Some(("t-1".into(), rollout.clone()))
+            found(&cwd, &resumed),
+            Some(("t-1".into(), rollout.clone(), true, 1))
         );
-        assert!(rollout_of(home.path(), Path::new("/elsewhere"), &fresh).is_none());
+        assert!(found(Path::new("/elsewhere"), &fresh).is_none());
         // A resumed conversation that was held in another folder is not this process's thread.
         let mut moved = process(1_793_347_500, &["codex", "resume", "t-1"]);
         moved.cwd = Some(home.path().to_path_buf());
-        assert_eq!(rollout_of(home.path(), home.path(), &moved), None);
-        // A newer `codex exec` run in the same folder is not the terminal's thread either.
+        assert_eq!(found(home.path(), &moved), None);
+        // A newer `codex exec` run in the same folder is not the terminal's thread either …
         let exec = serde_json::json!({"type":"session_meta","payload":{"id":"t-exec","cwd":cwd,"timestamp":"2026-10-30T08:05:00.000Z","originator":"codex_exec","source":"exec"}});
         std::fs::write(
             day.join("rollout-2026-10-30T08-05-00-t-exec.jsonl"),
@@ -707,9 +788,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            rollout_of(home.path(), &cwd, &fresh),
-            Some(("t-1".into(), rollout.clone()))
+            found(&cwd, &fresh),
+            Some(("t-1".into(), rollout.clone(), false, 1))
         );
+        // … but another terminal's newer thread makes the guess ambiguous.
+        let other = serde_json::json!({"type":"session_meta","payload":{"id":"t-other","cwd":cwd,"timestamp":"2026-10-30T08:06:00.000Z","source":"cli"}});
+        std::fs::write(
+            day.join("rollout-2026-10-30T08-06-00-t-other.jsonl"),
+            other.to_string(),
+        )
+        .unwrap();
+        assert_eq!(found(&cwd, &fresh).map(|f| f.3), Some(2));
         assert_eq!(codex_thread_cwd(home.path(), "t-1"), Some(cwd.clone()));
         assert_eq!(codex_thread_cwd(home.path(), "t-2"), None);
         let progress = codex_progress(&rollout).unwrap();

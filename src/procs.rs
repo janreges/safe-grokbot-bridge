@@ -150,17 +150,33 @@ impl Snapshot {
     }
 }
 
-/// Whether a process runs `command`: its name, or its first or second argument (for
-/// interpreters such as `node /usr/bin/codex`), names the same program.
+/// Programs that run a script named by their first argument (`node /usr/bin/codex`).
+const INTERPRETERS: &[&str] = &[
+    "node", "nodejs", "bun", "deno", "python", "python3", "sh", "bash", "zsh", "dash",
+];
+
+/// Whether a process runs `command`: its executable is that program, or an interpreter runs it as
+/// a script (`node /usr/bin/codex`, `bash /usr/bin/codex.mnt`). An argument of any other program
+/// (`vim codex`) does not count.
 pub fn runs_command(process: &ProcInfo, command: &str) -> bool {
     let wanted = program_name(command);
-    !wanted.is_empty()
-        && (program_name(&process.name) == wanted
-            || process
-                .cmd
-                .iter()
-                .take(2)
-                .any(|arg| program_name(arg) == wanted))
+    if wanted.is_empty() {
+        return false;
+    }
+    let executable = match process.cmd.first() {
+        Some(first) => program_name(first),
+        None => program_name(&process.name),
+    };
+    if executable == wanted || program_name(&process.name) == wanted {
+        return true;
+    }
+    INTERPRETERS.contains(&executable.as_str())
+        && process
+            .cmd
+            .iter()
+            .skip(1)
+            .find(|arg| !arg.starts_with('-'))
+            .is_some_and(|script| program_name(script) == wanted)
 }
 
 const SHELLS: &[&str] = &[
@@ -183,22 +199,38 @@ const SHELLS: &[&str] = &[
 
 /// Whether a process is, or may be, an interactive shell, which reads what is typed into its
 /// terminal once the program it started exits. A shell counts as non-interactive only when it
-/// runs a command (`sh -c …`) or a script file named by its first argument
-/// (`bash /usr/bin/codex.mnt`): it exits with them.
+/// runs a command (`sh -c …`, `pwsh -Command …`, `cmd /c …`) or a script file named by its first
+/// argument (`bash /usr/bin/codex.mnt`): it exits with them. Options that are not understood
+/// leave it interactive.
 pub fn is_interactive_shell(process: &ProcInfo) -> bool {
     let first = process
         .cmd
         .first()
         .map(String::as_str)
         .unwrap_or(&process.name);
-    if !SHELLS.contains(&program_name(first).trim_start_matches('-')) {
+    let name = program_name(first);
+    let name = name.trim_start_matches('-');
+    if !SHELLS.contains(&name) {
         return false;
     }
-    let runs_command = process
-        .cmd
-        .iter()
-        .skip(1)
-        .any(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c'));
+    let args = process.cmd.get(1..).unwrap_or_default();
+    let has = |options: &[&str]| {
+        args.iter()
+            .any(|arg| options.iter().any(|o| arg.eq_ignore_ascii_case(o)))
+    };
+    let runs_command = match name {
+        "cmd" => has(&["/c"]),
+        "pwsh" | "powershell" => {
+            has(&["-c", "-command", "-f", "-file", "-ec", "-encodedcommand"]) && !has(&["-noexit"])
+        }
+        // POSIX shells: `-c`, alone or in a cluster of short options (`-lc`).
+        _ => args.iter().any(|arg| {
+            arg.len() > 1
+                && arg.starts_with('-')
+                && arg[1..].chars().all(|c| c.is_ascii_alphabetic())
+                && arg.contains('c')
+        }),
+    };
     let runs_script = process.cmd.get(1).is_some_and(|arg| {
         let script = Path::new(arg);
         !arg.starts_with('-')
@@ -264,11 +296,33 @@ mod tests {
             "codex"
         ));
         assert!(!runs_command(&proc("bash", &["bash"]), "claude"));
+        // An editor opening a file named like an agent is not that agent.
+        assert!(!runs_command(&proc("vim", &["vim", "codex"]), "codex"));
     }
 
     #[test]
     fn interactive_shells_are_told_apart_from_wrappers() {
         let script = std::env::current_exe().unwrap().display().to_string();
+        assert!(is_interactive_shell(&proc(
+            "pwsh",
+            &["pwsh", "-Interactive"]
+        )));
+        assert!(is_interactive_shell(&proc(
+            "pwsh",
+            &["pwsh", "-NoExit", "-c", "x"]
+        )));
+        assert!(!is_interactive_shell(&proc(
+            "pwsh",
+            &["pwsh", "-Command", "codex"]
+        )));
+        assert!(!is_interactive_shell(&proc(
+            "cmd",
+            &["cmd.exe", "/C", "codex"]
+        )));
+        assert!(is_interactive_shell(&proc(
+            "cmd",
+            &["cmd.exe", "/K", "codex"]
+        )));
         assert!(is_interactive_shell(&proc("bash", &["bash"])));
         assert!(is_interactive_shell(&proc("zsh", &["-zsh"])));
         assert!(is_interactive_shell(&proc("bash", &["/bin/bash", "-l"])));

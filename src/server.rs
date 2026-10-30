@@ -73,6 +73,7 @@ pub async fn run(config: Config) -> Result<()> {
     if running > 0 {
         tracing::info!("{running} sessions started by the bridge are still running");
     }
+    app.sessions.prune_state();
     let router = api::router(app.clone());
     let listener = TcpListener::bind(listen)
         .await
