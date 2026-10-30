@@ -30,3 +30,7 @@ All notable changes to this project are documented in this file. The format is b
   `codex queue`).
 - CLI commands `serve`, `init`, `token`, `check`, `launch` and `openapi`.
 - A ready-made Grok Bot skill and deployment guides for Cloudflare Tunnel, VPS and services.
+- A guided setup in which Grok Bot creates the Cloudflare Tunnel and a coding agent on the
+  machine installs and configures the bridge, with prompts to paste on both sides.
+- Release archives for Linux (x86_64, aarch64), macOS (Apple silicon, Intel) and Windows, with
+  SHA-256 checksums.

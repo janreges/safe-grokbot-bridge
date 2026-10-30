@@ -12,12 +12,23 @@ The bridge keeps listening on `127.0.0.1`, and `cloudflared` on the same machine
 tunnel to Cloudflare. No inbound port is opened, and Cloudflare provides the public HTTPS
 endpoint. The client side needs nothing but `curl`.
 
+[Setup with Grok Bot and Cloudflare](setup.md) lets Grok Bot create the tunnel and a coding agent
+on your machine do the rest. By hand:
+
 1. In the Cloudflare dashboard, open **Zero Trust → Networks → Tunnels** and create a tunnel of
    type *Cloudflared*.
 2. Install the connector with the command the dashboard shows, e.g.
-   `sudo cloudflared service install <token>`. On Linux that is a systemd service. In WSL 2,
-   enable systemd (`[boot] systemd=true` in `/etc/wsl.conf`), or run
-   `cloudflared tunnel run --token <token>` in a tmux window.
+   `sudo cloudflared service install <token>`; on Linux that is a systemd service. Or, without
+   root, save the token in a file only you can read and run the connector as a service of your
+   user (in WSL 2 enable systemd first: `[boot] systemd=true` in `/etc/wsl.conf`):
+
+   ```bash
+   mkdir -p ~/.config/safe-grokbot-bridge
+   (umask 077; read -rsp 'Tunnel token: ' t; echo; printf '%s' "$t" > ~/.config/safe-grokbot-bridge/tunnel-token)
+   cloudflared tunnel --no-autoupdate run --token-file ~/.config/safe-grokbot-bridge/tunnel-token
+   ```
+
+   `--token-file` keeps the token off the command line, where other local users could see it.
 3. Add a **public hostname**, e.g. `pc1-bridge.example.com`, with service `HTTP` and URL
    `127.0.0.1:4765`.
 4. Test it from another machine:
@@ -124,6 +135,22 @@ journalctl --user -u safe-grokbot-bridge -f
 ```
 
 Without systemd, run `safe-grokbot-bridge serve` in a tmux window of its own.
+
+The tunnel connector can run the same way, as
+`~/.config/systemd/user/safe-grokbot-bridge-tunnel.service` (use the path of your `cloudflared`):
+
+```ini
+[Unit]
+Description=Cloudflare Tunnel for safe-grokbot-bridge
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate run --token-file %h/.config/safe-grokbot-bridge/tunnel-token
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
 
 ### macOS: launchd
 

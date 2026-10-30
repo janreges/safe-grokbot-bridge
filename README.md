@@ -3,6 +3,8 @@
 [![CI](https://github.com/janreges/safe-grokbot-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/janreges/safe-grokbot-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+![A cloud assistant reaches a developer workstation through a guarded tunnel](docs/assets/hero.png)
+
 **Let a remote AI agent work on your machines, safely.** `safe-grokbot-bridge` is a small daemon
 that gives an agent such as a [Grok Bot](https://x.ai) a narrow, authenticated HTTP API to your
 computers. Through it the agent can read your project folders and git history, see the Claude
@@ -11,15 +13,41 @@ Code, Codex and Hermes sessions running there, talk to them, and start new ones.
 You keep using your agents as before. The remote agent becomes a coordinator that can hand work to
 them and follow up while you are away from the keyboard, for example from your phone.
 
+## How it works
+
+![Cloud computer, Cloudflare edge, the bridge, and the agents on the machine](docs/assets/how-it-works.png)
+
+```mermaid
+flowchart LR
+    subgraph cloud["Grok Bot's cloud computer"]
+        bot["skill + curl<br/>secrets: URL, token"]
+    end
+    subgraph cf["Cloudflare"]
+        edge["HTTPS edge<br/>optional Access"]
+    end
+    subgraph machine["Your machine"]
+        cfd["cloudflared"]
+        bridge["safe-grokbot-bridge<br/>127.0.0.1:4765<br/>token, lockout, rate limit<br/>workspace capabilities"]
+        tmux["tmux: Claude Code, Codex,<br/>Hermes you can attach to"]
+        headless["headless runs:<br/>claude -p, codex exec"]
+        external["sessions outside tmux<br/>(experimental)"]
+        files[("allowed folders:<br/>files and git, read-only")]
+    end
+    bot -- "HTTPS + bearer token" --> edge
+    edge -- "tunnel, opened from the machine" --> cfd
+    cfd --> bridge
+    bridge --> tmux
+    bridge --> headless
+    bridge --> external
+    bridge --> files
 ```
- Grok Bot (cloud) ──curl, HTTPS + bearer token──► Cloudflare Tunnel ──► safe-grokbot-bridge
-                                                                         │
-                         ┌───────────────────────────────────────────────┤
-                         │ read-only files and git in the folders you allow
-                         │ tmux sessions: live Claude Code / Codex / Hermes terminals you can attach to
-                         │ headless sessions: claude -p, codex exec, hermes chat -Q
-                         └ sessions already running outside tmux (read-only, or experimental input)
-```
+
+1. The bridge listens on `127.0.0.1` only. `cloudflared` opens an outbound tunnel, so no port is
+   opened on the machine. (A public address with TLS and key pinning works too.)
+2. The bot calls the API with `curl` and a bearer token kept in a Grok secret. Every request is
+   authenticated, rate limited and checked against the folders you allowed.
+3. The bridge lists, starts and drives agent sessions there, and serves files and git history
+   read-only. The bot long-polls a session until the agent has answered.
 
 ## Features
 
@@ -52,9 +80,15 @@ them and follow up while you are away from the keyboard, for example from your p
 
 ## Quick start
 
+**With Grok Bot and Cloudflare:** follow [Setup with Grok Bot and Cloudflare](docs/setup.md).
+You paste one prompt into Grok Bot, which creates the tunnel, and one into Claude Code or Codex
+on your machine, which installs and configures the bridge. You only move two secrets by hand.
+
+**By hand:**
+
 ```bash
-# 1. Install (or download a binary from the releases page)
-cargo install --git https://github.com/janreges/safe-grokbot-bridge
+# 1. Install: download the archive for your platform from the releases page, or build it
+cargo install --locked --git https://github.com/janreges/safe-grokbot-bridge
 
 # 2. Create a config with a fresh token (printed once) and your projects folder as a workspace
 safe-grokbot-bridge init --workspace ~/projects
@@ -126,10 +160,12 @@ Session states: `working`, `waiting` (a permission prompt or question; read `scr
 with `keys`), `idle`, `finished` (closed after its answer with `keep_alive: false`), `exited`,
 `failed`, `unknown`.
 
-The bridge types only into panes that close with the agent: sessions it started, and panes
-created with the agent as their command. An agent you started from a shell inside tmux is listed
-but not controllable, because text sent after the agent exits would reach the shell. `resume`
-continues a conversation only in the folder where it was held.
+The bridge types only into panes where nothing but the agent can receive the text: sessions it
+started, and panes whose program is the agent (or a wrapper that ends with it). An agent you
+started from a shell inside tmux is listed but not typed into, because text sent after the agent
+exits would reach the shell; with `[experimental] external_sessions`, Claude Code and Codex there
+take messages through their own inbox or queue instead. `resume` continues a conversation only in
+the folder where it was held.
 
 ## Security
 
@@ -158,6 +194,7 @@ Read the [threat model](docs/design.md#6-security-model) and [SECURITY.md](SECUR
 
 ## Documentation
 
+- [Setup with Grok Bot and Cloudflare](docs/setup.md): the guided setup, with prompts to paste
 - [Configuration reference](docs/configuration.md)
 - [Deployment: Cloudflare Tunnel, VPS, running as a service](docs/deployment.md)
 - [Connecting Grok Bot, with a ready-made skill](docs/grok-bot.md)

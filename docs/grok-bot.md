@@ -1,7 +1,13 @@
 # Connecting Grok Bot
 
 [Grok Bot](https://x.ai) agents have a cloud computer with a shell, so they call the bridge with
-`curl`. On the bot's side nothing has to be installed. You set up three things:
+`curl`. On the bot's side nothing has to be installed.
+
+> **New here?** [Setup with Grok Bot and Cloudflare](setup.md) walks through everything, with
+> prompts to paste into Grok Bot and into Claude Code or Codex on your machine. This page is the
+> reference for the secrets and the skill.
+
+You set up three things:
 
 1. a bridge per machine, reachable over HTTPS on port 443 (see [deployment](deployment.md)),
 2. the bridge URLs and tokens as Grok Bot secrets,
@@ -33,6 +39,7 @@ Use one name scheme for all machines; the skill relies on it:
 | `SGB_VPS_URL` | `https://vps.example.com` |
 | `SGB_VPS_TOKEN` | `sgb_…` |
 | `SGB_VPS_PIN` | `sha256//…` (only for self-signed TLS) |
+| `SGB_PC1_ACCESS_ID`, `SGB_PC1_ACCESS_SECRET` | Cloudflare Access service token (only with the [optional second factor](setup.md#step-5-optional-a-second-factor-with-cloudflare-access)) |
 
 Keep in mind:
 
@@ -71,17 +78,24 @@ Code, Codex, Hermes) that run there.
 | pc1 | `SGB_PC1_URL`, `SGB_PC1_TOKEN` | main workstation |
 | vps | `SGB_VPS_URL`, `SGB_VPS_TOKEN`, `SGB_VPS_PIN` | server with self-signed TLS |
 
+Optional per machine: `SGB_<MACHINE>_ACCESS_ID` and `SGB_<MACHINE>_ACCESS_SECRET` (Cloudflare
+Access service token); the helper below sends them when they exist.
+
 ## Calling the API
 
-Define this helper in your shell (once per shell session). It never prints the token:
+Define this helper in your shell (once per shell session). It never prints a secret, and passes
+secrets to curl through a pipe, so they do not appear on a command line:
 
 ```bash
 sgb() { # sgb <machine> <METHOD> <path> [json-file]
   local m; m=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')
-  local url="SGB_${m}_URL" tok="SGB_${m}_TOKEN" pin="SGB_${m}_PIN" tls=()
+  local url="SGB_${m}_URL" tok="SGB_${m}_TOKEN" pin="SGB_${m}_PIN"
+  local aid="SGB_${m}_ACCESS_ID" asec="SGB_${m}_ACCESS_SECRET" tls=()
   [ -n "${!pin}" ] && tls=(-k --pinnedpubkey "${!pin}")
-  curl -sS --max-time 120 "${tls[@]}" -X "$2" -H "Authorization: Bearer ${!tok}" \
-       -H 'Content-Type: application/json' "${!url}$3" ${4:+--data-binary "@$4"}
+  curl -sS --max-time 120 "${tls[@]}" -X "$2" -H 'Content-Type: application/json' \
+       -H @<(printf 'Authorization: Bearer %s\n' "${!tok}"
+             [ -n "${!aid}" ] && printf 'CF-Access-Client-Id: %s\nCF-Access-Client-Secret: %s\n' "${!aid}" "${!asec}") \
+       "${!url}$3" ${4:+--data-binary "@$4"}
 }
 sgb pc1 GET /v1/info
 ```
