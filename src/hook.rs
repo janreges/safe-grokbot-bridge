@@ -20,8 +20,8 @@ const MAX_FILE_READ: u64 = 2 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct TurnEvent {
-    /// Unix time in seconds.
-    pub at: u64,
+    /// Unix time in milliseconds.
+    pub at_ms: u64,
     /// Claude session id or Codex thread id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -34,9 +34,13 @@ pub struct TurnEvent {
 }
 
 pub fn unix_now() -> u64 {
+    unix_now_ms() / 1000
+}
+
+pub fn unix_now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 
@@ -58,13 +62,13 @@ pub fn parse_payload(agent: &str, payload: &str) -> Option<TurnEvent> {
     let text = |value: &Value, max| value.as_str().map(|s| truncate(s, max));
     match agent {
         "claude" => Some(TurnEvent {
-            at: unix_now(),
+            at_ms: unix_now_ms(),
             session_id: text(&v["session_id"], 256),
             message: text(&v["last_assistant_message"], MAX_MESSAGE),
             input: None,
         }),
         "codex" if v["type"] == "agent-turn-complete" => Some(TurnEvent {
-            at: unix_now(),
+            at_ms: unix_now_ms(),
             session_id: text(&v["thread-id"], 256),
             message: text(&v["last-assistant-message"], MAX_MESSAGE),
             input: v["input-messages"]

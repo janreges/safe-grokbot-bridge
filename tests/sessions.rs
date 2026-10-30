@@ -435,6 +435,25 @@ async fn tmux_sessions_take_text_and_keys_and_ignore_other_panes() {
             .unwrap_or_default()
             .contains("GOT:hello world")
     );
+    // A pane respawned with another program (here a shell) no longer runs the agent the
+    // bridge started: the session counts as exited and takes no input.
+    let (_, second) = h
+        .post("/v1/sessions", json!({"cwd": h.root, "agent": "echo"}))
+        .await;
+    let second = second["id"].as_str().unwrap().to_string();
+    tmux(&["respawn-pane", "-k", "-t", &format!("={second}:"), "sh"]);
+    let (status, body) = h
+        .post(
+            &format!("/v1/sessions/{second}/input"),
+            json!({"text": "echo typed-into-a-shell"}),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (StatusCode::CONFLICT, Some("ended")),
+        "{body}"
+    );
+
     let _ = tmux(&["kill-server"]);
     // SAFETY: getuid has no preconditions.
     let uid = unsafe { libc::getuid() };

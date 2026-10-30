@@ -66,6 +66,13 @@ pub async fn run(config: Config) -> Result<()> {
         None => None,
     };
     let app = App::new(config).await?;
+    // Take over the tmux sessions started before a restart now, so that they count against
+    // `max_sessions` from the first request on.
+    let (sessions, _) = app.sessions.list(None).await;
+    let running = sessions.iter().filter(|s| s.started_by_bridge).count();
+    if running > 0 {
+        tracing::info!("{running} sessions started by the bridge are still running");
+    }
     let router = api::router(app.clone());
     let listener = TcpListener::bind(listen)
         .await

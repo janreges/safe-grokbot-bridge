@@ -8,8 +8,7 @@ use tokio::process::Command;
 
 use crate::exec;
 
-// `pane_start_command` comes last: it is the only field that may contain tabs.
-const FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{session_name}\t#{session_created}\t#{window_activity}\t#{pane_in_mode}\t#{pane_dead}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_start_command}";
+const FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{session_name}\t#{session_created}\t#{window_activity}\t#{pane_in_mode}\t#{pane_dead}\t#{pane_current_command}\t#{pane_current_path}";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Environment variables that identify the process the bridge itself may run in (a Claude Code
@@ -25,6 +24,11 @@ pub const INHERITED_SESSION_VARS: &[&str] = &[
     "TMUX",
     "TMUX_PANE",
 ];
+
+/// Variables that select an agent's profile. The bridge resolves profiles with its own
+/// environment (to read conversations and check `resume`), so a session takes them from the
+/// bridge, never from the tmux server.
+const PROFILE_VARS: &[&str] = &["CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERMES_HOME"];
 
 pub fn scrub_env(cmd: &mut Command) {
     for var in INHERITED_SESSION_VARS {
@@ -47,53 +51,10 @@ pub struct Pane {
     pub dead: bool,
     pub command: String,
     pub cwd: PathBuf,
-    /// The command the pane was created with; empty when it runs the default shell.
-    pub start_command: String,
 }
-
-impl Pane {
-    /// Whether the pane dies when its program exits, so nothing else (an interactive shell)
-    /// can receive typed text afterwards: it was created with an explicit command that is not a
-    /// shell.
-    pub fn owned_by_program(&self) -> bool {
-        let first = self
-            .start_command
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .trim_matches(|c| c == '"' || c == '\'');
-        let name = Path::new(first)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        let name = name.trim_end_matches(".exe");
-        !name.is_empty() && !SHELLS.contains(&name)
-    }
-}
-
-const SHELLS: &[&str] = &[
-    "sh",
-    "bash",
-    "zsh",
-    "fish",
-    "dash",
-    "ksh",
-    "mksh",
-    "tcsh",
-    "csh",
-    "nu",
-    "xonsh",
-    "elvish",
-    "pwsh",
-    "powershell",
-    "cmd",
-    "login",
-    "screen",
-    "tmux",
-];
 
 fn parse_pane(line: &str) -> Option<Pane> {
-    let mut parts = line.splitn(10, '\t');
+    let mut parts = line.splitn(9, '\t');
     Some(Pane {
         id: parts.next()?.to_string(),
         pid: parts.next()?.parse().ok()?,
@@ -104,7 +65,6 @@ fn parse_pane(line: &str) -> Option<Pane> {
         dead: parts.next()? == "1",
         command: parts.next()?.to_string(),
         cwd: PathBuf::from(parts.next()?),
-        start_command: parts.next().unwrap_or("").to_string(),
     })
 }
 
@@ -197,11 +157,7 @@ impl Tmux {
         ]
         .map(String::from)
         .to_vec();
-        for (key, value) in env {
-            args.extend(["-e".to_string(), format!("{key}={value}")]);
-        }
-        args.push("--".into());
-        args.extend(argv.iter().cloned());
+        args.extend(pane_command(env, argv));
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = self.run(&args, None).await?;
         out.lines()
@@ -213,11 +169,13 @@ impl Tmux {
     /// one Enter per line.
     pub async fn paste(&self, target: &str, text: &str) -> Result<()> {
         let buffer = format!("sgb-{}", uuid::Uuid::new_v4().simple());
-        self.run(
-            &["load-buffer", "-b", &buffer, "-"],
-            Some(text.as_bytes().to_vec()),
-        )
-        .await?;
+        // psmux keeps buffers per session server, so the buffer must be loaded where it is used.
+        let mut load = vec!["load-buffer", "-b", &buffer];
+        if cfg!(windows) {
+            load.extend(["-t", target]);
+        }
+        load.push("-");
+        self.run(&load, Some(text.as_bytes().to_vec())).await?;
         self.run(
             &["paste-buffer", "-p", "-d", "-b", &buffer, "-t", target],
             None,
@@ -235,7 +193,8 @@ impl Tmux {
 
     /// Types characters literally (no key-name interpretation).
     pub async fn send_literal(&self, target: &str, text: &str) -> Result<()> {
-        self.run(&["send-keys", "-t", target, "-l", "--", text], None)
+        let text = escape_separator(text);
+        self.run(&["send-keys", "-t", target, "-l", "--", &text], None)
             .await
             .map(drop)
     }
@@ -266,6 +225,52 @@ impl Tmux {
     }
 }
 
+/// The `-e` options and the command of a new session's pane. A running tmux server passes its own
+/// environment to new sessions, and that environment may come from an agent session
+/// (`CLAUDECODE` makes Claude Code refuse to start) or name another profile. So the profile
+/// variables are set to the bridge's values and the rest are removed when the pane starts.
+fn pane_command(env: &[(String, String)], argv: &[String]) -> Vec<String> {
+    let mut env = env.to_vec();
+    let mut unset: Vec<&str> = Vec::new();
+    for var in PROFILE_VARS {
+        if env.iter().any(|(key, _)| key == var) {
+            continue;
+        }
+        match std::env::var(var) {
+            Ok(value) => env.push((var.to_string(), value)),
+            Err(_) => unset.push(var),
+        }
+    }
+    // tmux sets `TMUX` and `TMUX_PANE` for the new pane itself.
+    unset.extend(
+        INHERITED_SESSION_VARS
+            .iter()
+            .filter(|var| !var.starts_with("TMUX")),
+    );
+    let mut args = Vec::new();
+    for (key, value) in env {
+        args.extend(["-e".to_string(), format!("{key}={value}")]);
+    }
+    args.push("--".into());
+    if cfg!(unix) {
+        args.push("/usr/bin/env".into());
+        for var in unset {
+            args.extend(["-u".to_string(), var.to_string()]);
+        }
+    }
+    args.extend(argv.iter().map(|arg| escape_separator(arg)));
+    args
+}
+
+/// tmux reads a command-line argument that ends in `;` as a command separator and drops the
+/// `;`, unless it is escaped as `\;`.
+fn escape_separator(arg: &str) -> String {
+    match arg.strip_suffix(';') {
+        Some(rest) => format!("{rest}\\;"),
+        None => arg.to_string(),
+    }
+}
+
 fn no_server(err: &anyhow::Error) -> bool {
     let text = err.to_string();
     text.contains("no server running")
@@ -285,7 +290,7 @@ mod tests {
     #[test]
     fn pane_lines_are_parsed() {
         let pane = parse_pane(
-            "%3\t4242\tsgb-app-claude-1a2b3c\t1793315500\t1793315506\t0\t0\tclaude\t/home/me/my app\t/usr/bin/claude --model\topus",
+            "%3\t4242\tsgb-app-claude-1a2b3c\t1793315500\t1793315506\t0\t0\tclaude\t/home/me/my app",
         )
         .unwrap();
         assert_eq!(
@@ -294,16 +299,22 @@ mod tests {
         );
         assert_eq!(pane.cwd, PathBuf::from("/home/me/my app"));
         assert!(!pane.in_mode && !pane.dead);
-        assert_eq!(pane.start_command, "/usr/bin/claude --model\topus");
-        assert!(pane.owned_by_program());
         assert!(parse_pane("garbage").is_none());
-        let shell = |cmd: &str| Pane {
-            start_command: cmd.into(),
-            ..pane.clone()
-        };
-        assert!(!shell("").owned_by_program());
-        assert!(!shell("bash").owned_by_program());
-        assert!(!shell("\"/bin/zsh\" -l").owned_by_program());
-        assert!(shell("\"codex.mnt\"").owned_by_program());
+    }
+
+    #[test]
+    fn pane_commands_keep_semicolons_and_drop_inherited_sessions() {
+        assert_eq!(escape_separator("fix it;"), "fix it\\;");
+        assert_eq!(escape_separator(";"), "\\;");
+        assert_eq!(escape_separator("a;b"), "a;b");
+        let env = [("CODEX_HOME".to_string(), "/p".to_string())];
+        let argv = ["/bin/codex".to_string(), "go;".to_string()];
+        let args = pane_command(&env, &argv);
+        assert!(args.windows(2).any(|w| w == ["-e", "CODEX_HOME=/p"]));
+        assert_eq!(args[args.len() - 2..], ["/bin/codex", "go\\;"]);
+        if cfg!(unix) {
+            assert!(args.windows(2).any(|w| w == ["-u", "CLAUDECODE"]));
+            assert!(!args.iter().any(|a| a == "TMUX"));
+        }
     }
 }

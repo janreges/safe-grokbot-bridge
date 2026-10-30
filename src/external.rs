@@ -73,14 +73,40 @@ pub async fn claude_agents(agent: &Agent) -> Result<Vec<ClaudeAgent>, String> {
     Ok(list)
 }
 
-/// Whether a Claude Code conversation was held in `cwd`: its transcript lives in the project
-/// folder Claude Code derives from `cwd`.
-pub fn claude_conversation_in(claude_dir: &Path, cwd: &Path, session_id: &str) -> bool {
-    claude_dir
-        .join("projects")
-        .join(claude_project_dir(cwd))
-        .join(format!("{session_id}.jsonl"))
-        .is_file()
+/// The folder a Claude Code conversation was held in: the first `cwd` its transcript records.
+/// The transcript's project folder name says less, because its encoding is lossy (`/w/a-b` and
+/// `/w/a/b` share one).
+pub fn claude_conversation_cwd(
+    claude_dir: &Path,
+    cwd_hint: &Path,
+    session_id: &str,
+) -> Option<PathBuf> {
+    use std::io::{BufRead, Read};
+    let file = std::fs::File::open(claude_transcript(claude_dir, cwd_hint, session_id)?).ok()?;
+    std::io::BufReader::new(file.take(4 * 1024 * 1024))
+        .lines()
+        .map_while(Result::ok)
+        .take(1000)
+        .find_map(|line| {
+            let entry: Value = serde_json::from_str(&line).ok()?;
+            entry["cwd"].as_str().map(PathBuf::from)
+        })
+}
+
+/// A Claude session's transcript: in the project folder Claude Code derives from `cwd`, or, for
+/// long paths that it shortens with a hash, found by a scan.
+fn claude_transcript(claude_dir: &Path, cwd: &Path, session_id: &str) -> Option<PathBuf> {
+    let projects = claude_dir.join("projects");
+    let file_name = format!("{session_id}.jsonl");
+    let path = projects.join(claude_project_dir(cwd)).join(&file_name);
+    if path.is_file() {
+        return Some(path);
+    }
+    std::fs::read_dir(&projects)
+        .ok()?
+        .flatten()
+        .map(|dir| dir.path().join(&file_name))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Claude Code's config directory (`CLAUDE_CONFIG_DIR`, default `~/.claude`).
@@ -187,18 +213,10 @@ pub fn claude_last_message(
     cwd: &Path,
     session_id: &str,
 ) -> Option<(String, String)> {
-    let projects = claude_dir.join("projects");
-    let file_name = format!("{session_id}.jsonl");
-    let mut path = projects.join(claude_project_dir(cwd)).join(&file_name);
-    if !path.exists() {
-        // Long paths are shortened with a hash; fall back to a scan.
-        path = std::fs::read_dir(&projects)
-            .ok()?
-            .flatten()
-            .map(|dir| dir.path().join(&file_name))
-            .find(|candidate| candidate.exists())?;
-    }
-    let tail = read_tail(&path, 1024 * 1024)?;
+    let tail = read_tail(
+        &claude_transcript(claude_dir, cwd, session_id)?,
+        1024 * 1024,
+    )?;
     tail.lines().rev().find_map(|line| {
         let entry: Value = serde_json::from_str(line).ok()?;
         if entry["type"] != "assistant" || entry["isSidechain"] == true {
@@ -363,8 +381,9 @@ pub async fn hermes_session_cwd(agent: &Agent, session_id: &str) -> Option<PathB
 }
 
 /// The rollout (thread) a live Codex process works on, as `(thread id, path)`: the thread named
-/// by `codex resume <id>`, or else the newest thread in `cwd` that started after the process.
-/// A process that has not started a thread yet has none.
+/// by `codex resume <id>`, or else the newest interactive thread in `cwd` that started after the
+/// process. A process that has not started a thread yet has none, and neither has one that
+/// resumed a conversation held in another folder: its history belongs to that folder.
 fn rollout_of(home: &Path, cwd: &Path, process: &ProcInfo) -> Option<(String, PathBuf)> {
     let resumed = process
         .cmd
@@ -376,15 +395,14 @@ fn rollout_of(home: &Path, cwd: &Path, process: &ProcInfo) -> Option<(String, Pa
         + std::time::Duration::from_secs(process.start_time.saturating_sub(5));
     recent_rollouts(home).into_iter().find_map(|path| {
         let meta = rollout_meta(&path)?;
-        let matches = match resumed {
-            Some(id) => &meta.id == id,
-            None => {
-                let same_dir = dunce::canonicalize(&meta.cwd)
-                    .map(|c| c == cwd)
-                    .unwrap_or(meta.cwd == cwd);
-                same_dir && meta.started.is_some_and(|at| at >= started)
-            }
-        };
+        let same_dir = dunce::canonicalize(&meta.cwd)
+            .map(|c| c == cwd)
+            .unwrap_or(meta.cwd == cwd);
+        let matches = same_dir
+            && match resumed {
+                Some(id) => &meta.id == id,
+                None => meta.interactive && meta.started.is_some_and(|at| at >= started),
+            };
         matches.then_some((meta.id, path))
     })
 }
@@ -433,6 +451,8 @@ struct RolloutMeta {
     id: String,
     cwd: PathBuf,
     started: Option<std::time::SystemTime>,
+    /// A terminal's conversation, not a `codex exec` run or a subagent's thread.
+    interactive: bool,
 }
 
 /// Thread id, working directory and start time from a rollout's first line (`session_meta`).
@@ -450,7 +470,15 @@ fn rollout_meta(path: &Path) -> Option<RolloutMeta> {
         return None;
     }
     let payload = &meta["payload"];
+    // `source` is "cli" for the terminal UI, "exec" for `codex exec` and an object for subagents.
+    let interactive = payload["originator"] != "codex_exec"
+        && match &payload["source"] {
+            Value::Null => true,
+            Value::String(source) => source != "exec",
+            _ => false,
+        };
     Some(RolloutMeta {
+        interactive,
         id: payload["id"].as_str()?.to_string(),
         cwd: PathBuf::from(payload["cwd"].as_str()?),
         started: payload["timestamp"]
@@ -587,6 +615,8 @@ mod tests {
         let project = dir.path().join("projects").join(claude_project_dir(cwd));
         std::fs::create_dir_all(&project).unwrap();
         let lines = [
+            r#"{"type":"mode","sessionId":"s-1"}"#,
+            r#"{"type":"user","cwd":"/home/me/my.app","sessionId":"s-1"}"#,
             r#"{"type":"assistant","timestamp":"2026-10-30T08:00:00Z","message":{"content":[{"type":"text","text":"first"}]}}"#,
             r#"{"type":"assistant","timestamp":"2026-10-30T08:01:00Z","message":{"content":[{"type":"text","text":"final answer"}]}}"#,
             r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"subagent"}]}}"#,
@@ -598,6 +628,14 @@ mod tests {
             (text.as_str(), at.as_str()),
             ("final answer", "2026-10-30T08:01:00Z")
         );
+        // `/home/me/my/app` shares the project folder; the transcript's `cwd` tells them apart.
+        let other = Path::new("/home/me/my/app");
+        assert_eq!(claude_project_dir(other), claude_project_dir(cwd));
+        assert_eq!(
+            claude_conversation_cwd(dir.path(), other, "s-1"),
+            Some(cwd.to_path_buf())
+        );
+        assert_eq!(claude_conversation_cwd(dir.path(), cwd, "s-2"), None);
     }
 
     #[test]
@@ -657,6 +695,21 @@ mod tests {
             Some(("t-1".into(), rollout.clone()))
         );
         assert!(rollout_of(home.path(), Path::new("/elsewhere"), &fresh).is_none());
+        // A resumed conversation that was held in another folder is not this process's thread.
+        let mut moved = process(1_793_347_500, &["codex", "resume", "t-1"]);
+        moved.cwd = Some(home.path().to_path_buf());
+        assert_eq!(rollout_of(home.path(), home.path(), &moved), None);
+        // A newer `codex exec` run in the same folder is not the terminal's thread either.
+        let exec = serde_json::json!({"type":"session_meta","payload":{"id":"t-exec","cwd":cwd,"timestamp":"2026-10-30T08:05:00.000Z","originator":"codex_exec","source":"exec"}});
+        std::fs::write(
+            day.join("rollout-2026-10-30T08-05-00-t-exec.jsonl"),
+            exec.to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            rollout_of(home.path(), &cwd, &fresh),
+            Some(("t-1".into(), rollout.clone()))
+        );
         assert_eq!(codex_thread_cwd(home.path(), "t-1"), Some(cwd.clone()));
         assert_eq!(codex_thread_cwd(home.path(), "t-2"), None);
         let progress = codex_progress(&rollout).unwrap();

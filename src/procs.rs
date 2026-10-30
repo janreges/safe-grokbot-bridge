@@ -115,6 +115,29 @@ impl Snapshot {
         out
     }
 
+    /// Whether text typed into a terminal whose program is `top` could reach an interactive
+    /// shell rather than the process `pid` below it: a process from `pid` up to `top` is one, or
+    /// the chain between them is unknown.
+    pub fn shell_between(&self, top: u32, pid: u32) -> bool {
+        let mut current = pid;
+        for _ in 0..16 {
+            let Some(process) = self.procs.get(&current) else {
+                return true;
+            };
+            if is_interactive_shell(process) {
+                return true;
+            }
+            if current == top {
+                return false;
+            }
+            match process.parent {
+                Some(parent) => current = parent,
+                None => return true,
+            }
+        }
+        true
+    }
+
     /// The first configured agent found in the process tree under `pid` (e.g. a tmux pane's
     /// shell), with the pid of the matching process.
     pub fn find_agent<'a>(&self, pid: u32, agents: &'a [Agent]) -> Option<(&'a Agent, u32)> {
@@ -138,6 +161,53 @@ pub fn runs_command(process: &ProcInfo, command: &str) -> bool {
                 .iter()
                 .take(2)
                 .any(|arg| program_name(arg) == wanted))
+}
+
+const SHELLS: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "dash",
+    "ksh",
+    "mksh",
+    "tcsh",
+    "csh",
+    "nu",
+    "xonsh",
+    "elvish",
+    "pwsh",
+    "powershell",
+    "cmd",
+];
+
+/// Whether a process is, or may be, an interactive shell, which reads what is typed into its
+/// terminal once the program it started exits. A shell counts as non-interactive only when it
+/// runs a command (`sh -c …`) or a script file named by its first argument
+/// (`bash /usr/bin/codex.mnt`): it exits with them.
+pub fn is_interactive_shell(process: &ProcInfo) -> bool {
+    let first = process
+        .cmd
+        .first()
+        .map(String::as_str)
+        .unwrap_or(&process.name);
+    if !SHELLS.contains(&program_name(first).trim_start_matches('-')) {
+        return false;
+    }
+    let runs_command = process
+        .cmd
+        .iter()
+        .skip(1)
+        .any(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c'));
+    let runs_script = process.cmd.get(1).is_some_and(|arg| {
+        let script = Path::new(arg);
+        !arg.starts_with('-')
+            && match &process.cwd {
+                Some(cwd) => cwd.join(script).is_file(),
+                None => script.is_absolute() && script.is_file(),
+            }
+    });
+    !(runs_command || runs_script)
 }
 
 /// File name without directory and without the extensions launchers add.
@@ -194,6 +264,31 @@ mod tests {
             "codex"
         ));
         assert!(!runs_command(&proc("bash", &["bash"]), "claude"));
+    }
+
+    #[test]
+    fn interactive_shells_are_told_apart_from_wrappers() {
+        let script = std::env::current_exe().unwrap().display().to_string();
+        assert!(is_interactive_shell(&proc("bash", &["bash"])));
+        assert!(is_interactive_shell(&proc("zsh", &["-zsh"])));
+        assert!(is_interactive_shell(&proc("bash", &["/bin/bash", "-l"])));
+        assert!(is_interactive_shell(&proc(
+            "bash",
+            &["bash", "--rcfile", "x"]
+        )));
+        assert!(!is_interactive_shell(&proc(
+            "bash",
+            &["/bin/bash", &script]
+        )));
+        assert!(!is_interactive_shell(&proc("sh", &["sh", "-c", "claude"])));
+        assert!(!is_interactive_shell(&proc(
+            "bash",
+            &["bash", "-lc", "claude"]
+        )));
+        assert!(!is_interactive_shell(&proc(
+            "claude",
+            &["claude", "--model", "opus"]
+        )));
     }
 
     #[test]
