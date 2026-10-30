@@ -81,8 +81,13 @@ pub fn claude_conversation_cwd(
     cwd_hint: &Path,
     session_id: &str,
 ) -> Option<PathBuf> {
+    transcript_cwd(&claude_transcript(claude_dir, cwd_hint, session_id)?)
+}
+
+/// The first `cwd` a Claude Code transcript records.
+pub fn transcript_cwd(transcript: &Path) -> Option<PathBuf> {
     use std::io::{BufRead, Read};
-    let file = std::fs::File::open(claude_transcript(claude_dir, cwd_hint, session_id)?).ok()?;
+    let file = std::fs::File::open(transcript).ok()?;
     std::io::BufReader::new(file.take(4 * 1024 * 1024))
         .lines()
         .map_while(Result::ok)
@@ -94,8 +99,9 @@ pub fn claude_conversation_cwd(
 }
 
 /// A Claude session's transcript: in the project folder Claude Code derives from `cwd`, or, for
-/// long paths that it shortens with a hash, found by a scan.
-fn claude_transcript(claude_dir: &Path, cwd: &Path, session_id: &str) -> Option<PathBuf> {
+/// long paths that it shortens with a hash, found by a scan. A new session has none until its
+/// first message.
+pub fn claude_transcript(claude_dir: &Path, cwd: &Path, session_id: &str) -> Option<PathBuf> {
     let projects = claude_dir.join("projects");
     let file_name = format!("{session_id}.jsonl");
     let path = projects.join(claude_project_dir(cwd)).join(&file_name);

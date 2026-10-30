@@ -1945,11 +1945,15 @@ fn main_thread_events<'a>(
 }
 
 /// Whether a Claude Code conversation began in `cwd`. One that began elsewhere (resumed here, or
-/// moved with `/cd`) carries that folder's history, so its transcript is not shown here.
+/// moved with `/cd`) carries that folder's history, so its transcript is not shown here. A new
+/// conversation has no transcript yet, and so no history from anywhere.
 fn claude_began_in(claude_dir: &Path, cwd: &Path, session_id: &str) -> bool {
-    external::claude_conversation_cwd(claude_dir, cwd, session_id)
-        .and_then(|origin| dunce::canonicalize(origin).ok())
-        .is_some_and(|origin| origin == cwd)
+    match external::claude_transcript(claude_dir, cwd, session_id) {
+        None => true,
+        Some(transcript) => external::transcript_cwd(&transcript)
+            .and_then(|origin| dunce::canonicalize(origin).ok())
+            .is_some_and(|origin| origin == cwd),
+    }
 }
 
 fn is_codex_title(message: Option<&str>) -> bool {
@@ -2253,6 +2257,30 @@ mod tests {
         let mut adopted = RecordState::default();
         main_thread_events(AgentKind::Codex, &reordered, &mut adopted);
         assert_eq!(adopted.agent_session_id.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn claude_transcripts_are_shown_only_where_their_conversation_began() {
+        let claude = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let here = dunce::canonicalize(work.path()).unwrap();
+        let elsewhere = here.join("private");
+        std::fs::create_dir(&elsewhere).unwrap();
+        // A new session has no transcript yet.
+        assert!(claude_began_in(claude.path(), &here, "new"));
+        let project = claude
+            .path()
+            .join("projects")
+            .join(external::claude_project_dir(&here));
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = |id: &str, cwd: &Path| {
+            let line = serde_json::json!({"type": "user", "cwd": cwd, "sessionId": id});
+            std::fs::write(project.join(format!("{id}.jsonl")), line.to_string()).unwrap();
+        };
+        transcript("local", &here);
+        transcript("moved", &elsewhere);
+        assert!(claude_began_in(claude.path(), &here, "local"));
+        assert!(!claude_began_in(claude.path(), &here, "moved"));
     }
 
     #[test]
