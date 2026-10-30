@@ -368,8 +368,14 @@ pub fn codex_thread_cwd(home: &Path, thread: &str) -> Option<PathBuf> {
     None
 }
 
-/// The folder a Hermes session belongs to, from `hermes sessions export`.
-pub async fn hermes_session_cwd(agent: &Agent, session_id: &str) -> Option<PathBuf> {
+/// A saved Hermes session, from `hermes sessions export`.
+pub struct HermesSession {
+    pub cwd: PathBuf,
+    /// Saved in YOLO mode (no approval prompts), which Hermes restores when it resumes the session.
+    pub yolo: bool,
+}
+
+pub async fn hermes_session(agent: &Agent, session_id: &str) -> Option<HermesSession> {
     let mut cmd = Command::new(&agent.command);
     scrub_env(&mut cmd);
     cmd.envs(agent.env.iter().map(|(k, v)| (k, v))).args([
@@ -384,7 +390,25 @@ pub async fn hermes_session_cwd(agent: &Agent, session_id: &str) -> Option<PathB
         .ok()?;
     let first = out.stdout.lines().next()?;
     let record: Value = serde_json::from_str(first).ok()?;
-    record["cwd"].as_str().map(PathBuf::from)
+    Some(HermesSession {
+        cwd: PathBuf::from(record["cwd"].as_str()?),
+        yolo: hermes_yolo(&record["model_config"]),
+    })
+}
+
+/// Whether a Hermes session's `model_config` (a JSON object, stored as a string) turns on YOLO
+/// mode. Like Hermes, a value that cannot be parsed means no.
+fn hermes_yolo(model_config: &Value) -> bool {
+    let config = match model_config {
+        Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+        other => other.clone(),
+    };
+    match &config["yolo_mode"] {
+        Value::Bool(on) => *on,
+        Value::Number(n) => n.as_f64().is_some_and(|n| n != 0.0),
+        Value::String(text) => !text.is_empty(),
+        _ => false,
+    }
 }
 
 /// The thread a live Codex process works on.
@@ -716,6 +740,15 @@ mod tests {
             Some(cwd.to_path_buf())
         );
         assert_eq!(claude_conversation_cwd(dir.path(), cwd, "s-2"), None);
+    }
+
+    #[test]
+    fn saved_hermes_yolo_mode_is_recognised() {
+        let saved = |config: &str| hermes_yolo(&Value::String(config.into()));
+        assert!(saved(r#"{"yolo_mode": true, "max_iterations": 150}"#));
+        assert!(!saved(r#"{"max_iterations": 150}"#));
+        assert!(!saved(r#"{"yolo_mode": false}"#));
+        assert!(!saved("not json"));
     }
 
     #[test]

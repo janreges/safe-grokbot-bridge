@@ -115,16 +115,16 @@ impl Snapshot {
         out
     }
 
-    /// Whether text typed into a terminal whose program is `top` could reach an interactive
-    /// shell rather than the process `pid` below it: a process from `pid` up to `top` is one, or
-    /// the chain between them is unknown.
+    /// Whether text typed into a terminal whose program is `top` could reach a shell rather than
+    /// the process `pid` below it: a process from `pid` up to `top` may read the terminal after
+    /// its child exits (see [`may_read_terminal`]), or the chain between them is unknown.
     pub fn shell_between(&self, top: u32, pid: u32) -> bool {
         let mut current = pid;
         for _ in 0..16 {
             let Some(process) = self.procs.get(&current) else {
                 return true;
             };
-            if is_interactive_shell(process) {
+            if may_read_terminal(process) {
                 return true;
             }
             if current == top {
@@ -197,12 +197,11 @@ const SHELLS: &[&str] = &[
     "cmd",
 ];
 
-/// Whether a process is, or may be, an interactive shell, which reads what is typed into its
-/// terminal once the program it started exits. A shell counts as non-interactive only when it
-/// runs a command (`sh -c …`, `pwsh -Command …`, `cmd /c …`) or a script file named by its first
-/// argument (`bash /usr/bin/codex.mnt`): it exits with them. Options that are not understood
-/// leave it interactive.
-pub fn is_interactive_shell(process: &ProcInfo) -> bool {
+/// Whether a process may read what is typed into its terminal after the program it started
+/// exits: a shell that is interactive, runs a script, or runs more than one simple command
+/// (`sh -c 'claude; exec bash'`). Only a shell running one simple command (`sh -c "claude"`,
+/// `cmd /c codex`) ends with that program. Options that are not understood count as interactive.
+pub fn may_read_terminal(process: &ProcInfo) -> bool {
     let first = process
         .cmd
         .first()
@@ -214,32 +213,37 @@ pub fn is_interactive_shell(process: &ProcInfo) -> bool {
         return false;
     }
     let args = process.cmd.get(1..).unwrap_or_default();
-    let has = |options: &[&str]| {
+    let position = |options: &[&str]| {
         args.iter()
-            .any(|arg| options.iter().any(|o| arg.eq_ignore_ascii_case(o)))
+            .position(|arg| options.iter().any(|o| arg.eq_ignore_ascii_case(o)))
     };
-    let runs_command = match name {
-        "cmd" => has(&["/c"]),
+    let command = match name {
+        // cmd.exe takes the rest of its command line as the command.
+        "cmd" => position(&["/c"]).map(|i| args[i + 1..].join(" ")),
+        "pwsh" | "powershell" if position(&["-noexit"]).is_some() => None,
         "pwsh" | "powershell" => {
-            has(&["-c", "-command", "-f", "-file", "-ec", "-encodedcommand"]) && !has(&["-noexit"])
+            position(&["-c", "-command"]).and_then(|i| args.get(i + 1).cloned())
         }
-        // POSIX shells: `-c`, alone or in a cluster of short options (`-lc`).
-        _ => args.iter().any(|arg| {
-            arg.len() > 1
-                && arg.starts_with('-')
-                && arg[1..].chars().all(|c| c.is_ascii_alphabetic())
-                && arg.contains('c')
-        }),
+        // POSIX shells: the argument after `-c`, alone or in a cluster of short options (`-lc`).
+        _ => args
+            .iter()
+            .position(|arg| {
+                arg.len() > 1
+                    && arg.starts_with('-')
+                    && arg[1..].chars().all(|c| c.is_ascii_alphabetic())
+                    && arg.contains('c')
+            })
+            .and_then(|i| args.get(i + 1).cloned()),
     };
-    let runs_script = process.cmd.get(1).is_some_and(|arg| {
-        let script = Path::new(arg);
-        !arg.starts_with('-')
-            && match &process.cwd {
-                Some(cwd) => cwd.join(script).is_file(),
-                None => script.is_absolute() && script.is_file(),
-            }
-    });
-    !(runs_command || runs_script)
+    !command.is_some_and(|command| simple_command(&command))
+}
+
+/// One command without control operators, substitutions or redirections.
+fn simple_command(command: &str) -> bool {
+    let command = command.trim();
+    !command.is_empty()
+        && !command.starts_with('-')
+        && !command.chars().any(|c| ";&|\n\r`$(){}<>^".contains(c))
 }
 
 /// File name without directory and without the extensions launchers add.
@@ -301,48 +305,22 @@ mod tests {
     }
 
     #[test]
-    fn interactive_shells_are_told_apart_from_wrappers() {
+    fn shells_that_end_with_their_program_are_told_apart() {
         let script = std::env::current_exe().unwrap().display().to_string();
-        assert!(is_interactive_shell(&proc(
-            "pwsh",
-            &["pwsh", "-Interactive"]
-        )));
-        assert!(is_interactive_shell(&proc(
-            "pwsh",
-            &["pwsh", "-NoExit", "-c", "x"]
-        )));
-        assert!(!is_interactive_shell(&proc(
-            "pwsh",
-            &["pwsh", "-Command", "codex"]
-        )));
-        assert!(!is_interactive_shell(&proc(
-            "cmd",
-            &["cmd.exe", "/C", "codex"]
-        )));
-        assert!(is_interactive_shell(&proc(
-            "cmd",
-            &["cmd.exe", "/K", "codex"]
-        )));
-        assert!(is_interactive_shell(&proc("bash", &["bash"])));
-        assert!(is_interactive_shell(&proc("zsh", &["-zsh"])));
-        assert!(is_interactive_shell(&proc("bash", &["/bin/bash", "-l"])));
-        assert!(is_interactive_shell(&proc(
-            "bash",
-            &["bash", "--rcfile", "x"]
-        )));
-        assert!(!is_interactive_shell(&proc(
-            "bash",
-            &["/bin/bash", &script]
-        )));
-        assert!(!is_interactive_shell(&proc("sh", &["sh", "-c", "claude"])));
-        assert!(!is_interactive_shell(&proc(
-            "bash",
-            &["bash", "-lc", "claude"]
-        )));
-        assert!(!is_interactive_shell(&proc(
-            "claude",
-            &["claude", "--model", "opus"]
-        )));
+        let reads = |cmd: &[&str]| may_read_terminal(&proc(cmd[0], cmd));
+        // Interactive shells.
+        assert!(reads(&["bash"]) && reads(&["-zsh"]) && reads(&["/bin/bash", "-l"]));
+        assert!(reads(&["bash", "--rcfile", "x"]) && reads(&["pwsh", "-Interactive"]));
+        assert!(reads(&["pwsh", "-NoExit", "-c", "x"]) && reads(&["cmd.exe", "/K", "codex"]));
+        // Scripts and compound commands may go on after the agent exits.
+        assert!(reads(&["/bin/bash", &script]) && reads(&["pwsh", "-File", "x.ps1"]));
+        assert!(
+            reads(&["sh", "-c", "claude; exec bash"]) && reads(&["sh", "-c", "claude && bash"])
+        );
+        // One simple command ends with it.
+        assert!(!reads(&["sh", "-c", "claude --model opus"]) && !reads(&["bash", "-lc", "claude"]));
+        assert!(!reads(&["pwsh", "-Command", "codex"]) && !reads(&["cmd.exe", "/C", "codex"]));
+        assert!(!reads(&["claude", "--model", "opus"]));
     }
 
     #[test]

@@ -71,7 +71,10 @@ pub async fn run(config: Config) -> Result<()> {
     let (sessions, _) = app.sessions.list(None).await;
     let running = sessions.iter().filter(|s| s.started_by_bridge).count();
     if running > 0 {
-        tracing::info!("{running} sessions started by the bridge are still running");
+        tracing::info!(
+            running,
+            "took over the sessions it had started before the restart"
+        );
     }
     app.sessions.prune_state();
     let router = api::router(app.clone());

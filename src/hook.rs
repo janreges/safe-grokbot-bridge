@@ -44,6 +44,9 @@ pub fn unix_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Appended to a message or input that was cut.
+pub const TRUNCATED: &str = "\n[… truncated]";
+
 fn truncate(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
@@ -52,7 +55,7 @@ fn truncate(text: &str, max: usize) -> String {
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}\n[… truncated]", &text[..end])
+    format!("{}{TRUNCATED}", &text[..end])
 }
 
 /// Extracts a turn event from an agent's hook payload. Payloads that are not a completed turn
