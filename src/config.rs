@@ -367,7 +367,16 @@ impl Config {
 
     pub fn parse(text: &str, path: &Path) -> Result<Config> {
         let raw: RawConfig = toml::from_str(text)?;
-        let server = resolve_server(raw.server)?;
+        let mut server = resolve_server(raw.server)?;
+        if server.state_dir.is_relative() {
+            // Relative to the config file, never to the working directory: the same path is
+            // handed to agent hooks, which run in other folders.
+            let base = std::path::absolute(path)
+                .ok()
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+                .unwrap_or_default();
+            server.state_dir = base.join(&server.state_dir);
+        }
         let tokens = resolve_tokens(raw.tokens)?;
         validate_limits(&raw.limits)?;
         let sessions = SessionSettings {
