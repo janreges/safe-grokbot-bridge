@@ -5,7 +5,7 @@
 
 use std::sync::OnceLock;
 
-use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
@@ -108,12 +108,14 @@ async fn openapi_document() -> Json<utoipa::openapi::OpenApi> {
 }
 
 /// Every authenticated operation can answer 401 (bad token) and 429 (rate limit or lockout,
-/// with `Retry-After`); declaring them once keeps the handlers readable.
+/// with `Retry-After`), and every operation with a JSON body can reject the body with 413, 415
+/// or 422; declaring them once keeps the handlers readable.
 fn add_common_responses(openapi: &mut utoipa::openapi::OpenApi) {
+    use std::collections::btree_map::Entry;
     use utoipa::openapi::content::ContentBuilder;
     use utoipa::openapi::header::HeaderBuilder;
     use utoipa::openapi::schema::{ObjectBuilder, Type};
-    use utoipa::openapi::{Ref, ResponseBuilder};
+    use utoipa::openapi::{Ref, RefOr, ResponseBuilder};
 
     let error = || {
         ContentBuilder::new()
@@ -131,8 +133,19 @@ fn add_common_responses(openapi: &mut utoipa::openapi::OpenApi) {
     let too_many = ResponseBuilder::new()
         .description("Rate limit exceeded, or this address is blocked after failed authentications")
         .content("application/json", error())
-        .header("Retry-After", retry_after)
+        .header("Retry-After", retry_after.clone())
         .build();
+    let body_errors = [
+        ("413", "The JSON body is larger than 1 MiB"),
+        (
+            "415",
+            "The body is not sent as `Content-Type: application/json`",
+        ),
+        (
+            "422",
+            "The JSON body does not match the schema (a missing or unknown field, or a wrong type)",
+        ),
+    ];
     for (path, item) in openapi.paths.paths.iter_mut() {
         if path == "/healthz" {
             continue;
@@ -144,13 +157,37 @@ fn add_common_responses(openapi: &mut utoipa::openapi::OpenApi) {
             &mut item.delete,
         ];
         for operation in operations.into_iter().flatten() {
+            let has_body = operation.request_body.is_some();
             let responses = &mut operation.responses.responses;
             responses
                 .entry("401".into())
                 .or_insert_with(|| unauthorized.clone().into());
-            responses
-                .entry("429".into())
-                .or_insert_with(|| too_many.clone().into());
+            match responses.entry("429".into()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(too_many.clone().into());
+                }
+                Entry::Occupied(mut entry) => {
+                    if let RefOr::T(response) = entry.get_mut() {
+                        response.description.push_str(
+                            ", or the rate limit or an authentication lockout (wait `Retry-After` seconds)",
+                        );
+                        response
+                            .headers
+                            .insert("Retry-After".into(), retry_after.clone().into());
+                    }
+                }
+            }
+            if has_body {
+                for (status, description) in body_errors {
+                    responses.entry(status.into()).or_insert_with(|| {
+                        ResponseBuilder::new()
+                            .description(description)
+                            .content("application/json", error())
+                            .build()
+                            .into()
+                    });
+                }
+            }
         }
     }
 }
@@ -182,6 +219,16 @@ fn json<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
             code,
             format!("Invalid JSON body: {}", rejection.body_text()),
         )
+    })
+}
+
+/// Turns a session id that is not valid in a URL (e.g. `%FF`) into the API's JSON error format.
+fn session_id(id: Result<Path<String>, PathRejection>) -> Result<String, ApiError> {
+    id.map(|Path(id)| id).map_err(|rejection| {
+        ApiError::bad_request(format!(
+            "Invalid session id in the URL: {}. Use an `id` from GET /v1/sessions.",
+            rejection.body_text()
+        ))
     })
 }
 
@@ -354,6 +401,7 @@ pub struct ListFilesQuery {
     (status = 400, description = "Not an absolute directory path", body = ErrorBody),
     (status = 403, description = "Outside the workspaces, denied, or `files` not allowed", body = ErrorBody),
     (status = 404, description = "The directory does not exist", body = ErrorBody),
+    (status = 409, description = "The directory was replaced during the listing; try again", body = ErrorBody),
 ))]
 async fn list_files(
     State(app): State<AppState>,
@@ -394,6 +442,7 @@ pub struct ReadFileQuery {
     (status = 400, description = "Not a file, or `start_line` past the end", body = ErrorBody),
     (status = 403, description = "Outside the workspaces, denied, or `files` not allowed", body = ErrorBody),
     (status = 404, description = "The file does not exist", body = ErrorBody),
+    (status = 409, description = "The file was replaced while it was being opened; try again", body = ErrorBody),
     (status = 413, description = "File larger than 10 MiB", body = ErrorBody),
     (status = 415, description = "Binary file", body = ErrorBody),
 ))]
@@ -643,13 +692,15 @@ pub struct GetSessionQuery {
     params(("id" = String, Path, description = "Session id from the session list"), GetSessionQuery),
     responses(
         (status = 200, body = Session),
+        (status = 400, description = "Invalid session id or query", body = ErrorBody),
         (status = 404, description = "No such session", body = ErrorBody),
     ))]
 async fn get_session(
     State(app): State<AppState>,
-    Path(id): Path<String>,
+    id: Result<Path<String>, PathRejection>,
     q: Result<Query<GetSessionQuery>, QueryRejection>,
 ) -> Result<Json<Session>, ApiError> {
+    let id = session_id(id)?;
     let q = query(q)?;
     app.sessions.get(&id, q.lines, q.wait).await.map(Json)
 }
@@ -671,9 +722,10 @@ async fn get_session(
 async fn send_input(
     State(app): State<AppState>,
     Extension(caller): Extension<Caller>,
-    Path(id): Path<String>,
+    id: Result<Path<String>, PathRejection>,
     body: Result<Json<InputRequest>, JsonRejection>,
 ) -> Result<Json<Session>, ApiError> {
+    let id = session_id(id)?;
     let request = json(body)?;
     app.sessions
         .input(&id, request, &caller.token)
@@ -687,6 +739,7 @@ async fn send_input(
     params(("id" = String, Path, description = "Session id")),
     responses(
         (status = 200, description = "Stopped; the final state and screen", body = Session),
+        (status = 400, description = "Invalid session id", body = ErrorBody),
         (status = 403, description = "`input` not allowed in this folder", body = ErrorBody),
         (status = 404, description = "No such session", body = ErrorBody),
         (status = 409, description = "Not started by the bridge", body = ErrorBody),
@@ -694,7 +747,8 @@ async fn send_input(
 async fn stop_session(
     State(app): State<AppState>,
     Extension(caller): Extension<Caller>,
-    Path(id): Path<String>,
+    id: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Session>, ApiError> {
+    let id = session_id(id)?;
     app.sessions.stop(&id, &caller.token).await.map(Json)
 }

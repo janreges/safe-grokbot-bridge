@@ -34,6 +34,10 @@ async fn healthz_is_public_and_everything_else_needs_a_token() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["workspaces"][0]["path"], h.root.display().to_string());
     assert_eq!(h.get("/openapi.json").await.0, StatusCode::OK);
+    // Errors keep the JSON shape even when the URL itself cannot be decoded.
+    let (status, body) = h.get("/v1/sessions/%FF").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_request", "{body}");
 }
 
 #[tokio::test]

@@ -337,7 +337,12 @@ pub async fn middleware(
     let token = match app.auth.check(ip, authorization, Instant::now()) {
         Ok(token) => token,
         Err(err) => {
-            tracing::warn!(%ip, %method, path = uri.path(), code = err.code, "request rejected");
+            // Requests from a blocked address are not logged one by one (the block itself is),
+            // and the path is shortened: neither may let a client flood the log.
+            if err.code != "too_many_failures" {
+                let path: String = uri.path().chars().take(100).collect();
+                tracing::warn!(%ip, %method, path, code = err.code, "request rejected");
+            }
             return err.into_response();
         }
     };
