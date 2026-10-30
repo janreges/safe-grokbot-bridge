@@ -1609,10 +1609,10 @@ impl Sessions {
                     SessionState::Idle => {
                         let answered = {
                             let state = record.state();
-                            state
-                                .last_turn_ms
-                                .zip(state.last_input_ms)
-                                .is_some_and(|(turn, input)| turn >= input)
+                            // A turn started with keys (a draft, then Enter) has no recorded input.
+                            state.last_turn_ms.is_some_and(|turn| {
+                                state.last_input_ms.is_none_or(|input| turn >= input)
+                            })
                         };
                         // Without a hook event (hooks disabled), Claude's own idle status after
                         // having been busy is the next best signal.
