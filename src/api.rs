@@ -476,8 +476,8 @@ async fn git_in(
             "`{dir}` is not a directory. Pass the repository folder as `dir`."
         )));
     }
-    let toplevel = git::toplevel(&resolved.path).await?;
-    paths::require_git_scope(&app.config, &toplevel)?;
+    let repo = git::repository(&resolved.path).await?;
+    paths::require_git_scope(&app.config, &repo.toplevel, &repo.storage)?;
     git::run(&resolved.path, request).await.map(Json)
 }
 

@@ -90,8 +90,14 @@ pub fn require(workspace: &Workspace, capability: Capability) -> Result<(), ApiE
 }
 
 /// Git reports on a whole repository, not on a folder. So the repository's root must lie in a
-/// workspace that allows `git`, and no workspace nested in the repository may forbid it.
-pub fn require_git_scope(config: &Config, toplevel: &Path) -> Result<(), ApiError> {
+/// workspace that allows `git`, and no workspace nested in the repository may forbid it. The
+/// places git reads history from (`storage`: the git directory, objects and their alternates) must
+/// lie in workspaces that allow `git` as well, because a `.git` file can point anywhere.
+pub fn require_git_scope(
+    config: &Config,
+    toplevel: &Path,
+    storage: &[PathBuf],
+) -> Result<(), ApiError> {
     let Some(workspace) = workspace_for(config, toplevel) else {
         return Err(ApiError::forbidden(format!(
             "This folder belongs to the git repository at `{}`, which reaches outside the workspaces this bridge exposes; its history and diffs would include files you may not see.",
@@ -107,6 +113,16 @@ pub fn require_git_scope(config: &Config, toplevel: &Path) -> Result<(), ApiErro
             toplevel.display(),
             nested.name,
             nested.root.display()
+        )));
+    }
+    if let Some(outside) = storage
+        .iter()
+        .find(|path| !workspace_for(config, path).is_some_and(|ws| ws.allows(Capability::Git)))
+    {
+        return Err(ApiError::forbidden(format!(
+            "The git repository at `{}` reads its history from `{}` (through a `.git` file, a linked worktree or object alternates), which is outside the workspaces that allow `git`, so git access to it is refused.",
+            toplevel.display(),
+            outside.display()
         )));
     }
     Ok(())
@@ -190,22 +206,31 @@ mod tests {
         let private = repo.join("private");
         std::fs::create_dir_all(&public).unwrap();
         std::fs::create_dir_all(&private).unwrap();
+        let storage = [repo.join(".git")];
         // Only a subfolder is exposed: the repository root is outside every workspace.
         let cfg = config(&[(&public, "[\"git\"]")]);
         assert_eq!(
-            require_git_scope(&cfg, &repo).unwrap_err().code,
+            require_git_scope(&cfg, &repo, &storage).unwrap_err().code,
             "forbidden"
         );
         // The root is exposed, but a nested workspace forbids git.
         let cfg = config(&[(&repo, "[\"git\"]"), (&private, "[\"files\"]")]);
         assert!(
-            require_git_scope(&cfg, &repo)
+            require_git_scope(&cfg, &repo, &storage)
                 .unwrap_err()
                 .message
                 .contains("contains workspace")
         );
         let cfg = config(&[(&repo, "[\"git\"]")]);
-        assert!(require_git_scope(&cfg, &repo).is_ok());
+        assert!(require_git_scope(&cfg, &repo, &storage).is_ok());
+        // The working tree is exposed, but its `.git` file points at another repository.
+        let cfg = config(&[(&public, "[\"git\"]")]);
+        assert!(
+            require_git_scope(&cfg, &public, &storage)
+                .unwrap_err()
+                .message
+                .contains("reads its history from")
+        );
     }
 
     #[test]
