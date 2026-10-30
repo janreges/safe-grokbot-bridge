@@ -77,6 +77,16 @@
                 }
               }
             }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -200,6 +210,16 @@
                 "description": "Seconds to wait before retrying"
               }
             },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -347,6 +367,16 @@
                 }
               }
             }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -467,6 +497,16 @@
           },
           "503": {
             "description": "git cannot be run on this machine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -602,6 +642,16 @@
                 }
               }
             }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -720,6 +770,16 @@
                 }
               }
             }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -820,6 +880,16 @@
                 }
               }
             }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -869,6 +939,16 @@
                 }
               }
             }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -902,6 +982,16 @@
               }
             }
           },
+          "400": {
+            "description": "`path` is not an absolute path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Missing or invalid token",
             "content": {
@@ -922,6 +1012,16 @@
               }
             }
           },
+          "404": {
+            "description": "`path` does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limit exceeded, or this address is blocked after failed authentications",
             "headers": {
@@ -932,6 +1032,16 @@
                 "description": "Seconds to wait before retrying"
               }
             },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -991,6 +1101,16 @@
           },
           "403": {
             "description": "`start`, the agent or `bypass_permissions` not allowed in this folder",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`cwd` does not exist",
             "content": {
               "application/json": {
                 "schema": {
@@ -1069,6 +1189,16 @@
           },
           "503": {
             "description": "The agent or tmux is not installed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -1177,6 +1307,16 @@
                 }
               }
             }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       },
@@ -1278,6 +1418,16 @@
           },
           "502": {
             "description": "The tmux session could not be stopped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -1428,6 +1578,16 @@
           },
           "502": {
             "description": "Delivery to a session outside tmux failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
             "content": {
               "application/json": {
                 "schema": {

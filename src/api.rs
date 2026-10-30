@@ -135,6 +135,10 @@ fn add_common_responses(openapi: &mut utoipa::openapi::OpenApi) {
         .content("application/json", error())
         .header("Retry-After", retry_after.clone())
         .build();
+    let unexpected = ResponseBuilder::new()
+        .description("An unexpected error in the bridge; `error.message` says what failed")
+        .content("application/json", error())
+        .build();
     let body_errors = [
         ("413", "The JSON body is larger than 1 MiB"),
         (
@@ -159,6 +163,9 @@ fn add_common_responses(openapi: &mut utoipa::openapi::OpenApi) {
         for operation in operations.into_iter().flatten() {
             let has_body = operation.request_body.is_some();
             let responses = &mut operation.responses.responses;
+            responses
+                .entry("default".into())
+                .or_insert_with(|| unexpected.clone().into());
             responses
                 .entry("401".into())
                 .or_insert_with(|| unauthorized.clone().into());
@@ -658,6 +665,8 @@ pub struct ListSessionsQuery {
 /// running outside tmux. Check here before starting a new session in a folder.
 #[utoipa::path(get, path = "/v1/sessions", tag = "sessions", params(ListSessionsQuery), responses(
     (status = 200, description = "The sessions you may see", body = SessionList),
+    (status = 400, description = "`path` is not an absolute path", body = ErrorBody),
+    (status = 404, description = "`path` does not exist", body = ErrorBody),
     (status = 403, description = "`path` is outside the workspaces", body = ErrorBody),
 ))]
 async fn list_sessions(
@@ -694,6 +703,7 @@ async fn list_sessions(
     (status = 201, description = "Started", body = Session),
     (status = 400, description = "Invalid request", body = ErrorBody),
     (status = 403, description = "`start`, the agent or `bypass_permissions` not allowed in this folder", body = ErrorBody),
+    (status = 404, description = "`cwd` does not exist", body = ErrorBody),
     (status = 409, description = "The conversation to resume is open elsewhere", body = ErrorBody),
     (status = 429, description = "Too many running sessions", body = ErrorBody),
     (status = 502, description = "The agent exited right after starting", body = ErrorBody),
