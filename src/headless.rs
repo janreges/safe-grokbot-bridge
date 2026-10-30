@@ -105,15 +105,12 @@ async fn run_turn(
     // Lines are read in their own task and passed over a channel: receiving is cancel-safe, so
     // no partly read line is lost when the exit status arrives first.
     let mut stdout = BufReader::new(child.stdout.take().expect("stdout is piped"));
-    let (lines_tx, mut lines) = tokio::sync::mpsc::channel::<String>(64);
+    let (lines_tx, mut lines) = tokio::sync::mpsc::channel::<(String, bool)>(64);
     let reader = tokio::spawn(async move {
         let mut line = Vec::new();
-        while let Ok(true) = read_line(&mut stdout, &mut line).await {
-            if lines_tx
-                .send(String::from_utf8_lossy(&line).into_owned())
-                .await
-                .is_err()
-            {
+        while let Ok(Some(cut)) = read_line(&mut stdout, &mut line).await {
+            let line = String::from_utf8_lossy(&line).into_owned();
+            if lines_tx.send((line, cut)).await.is_err() {
                 break;
             }
         }
@@ -121,7 +118,10 @@ async fn run_turn(
 
     let mut outcome: Option<Result<(), String>> = None;
     let mut plain = String::new();
-    let mut handle = |line: &str| match agent.kind {
+    // Output that had to be cut: an event cut in two cannot be parsed, so its answer is lost.
+    let mut lost = false;
+    let mut handle = |line: &str, cut: bool| match agent.kind {
+        _ if cut => lost = true,
         AgentKind::Claude | AgentKind::Codex => {
             let events = if agent.kind == AgentKind::Claude {
                 agents::parse_claude_line(line)
@@ -145,6 +145,8 @@ async fn run_turn(
             if plain.len() < MAX_PLAIN {
                 plain.push_str(line);
                 plain.push('\n');
+            } else {
+                lost = true;
             }
         }
     };
@@ -153,7 +155,7 @@ async fn run_turn(
         let status = loop {
             tokio::select! {
                 line = lines.recv(), if open => match line {
-                    Some(line) => handle(&line),
+                    Some((line, cut)) => handle(&line, cut),
                     None => open = false,
                 },
                 exited = child.wait() => break exited,
@@ -169,8 +171,8 @@ async fn run_turn(
         // keep stdout open: take what arrives within a short grace period.
         if open {
             let drain = async {
-                while let Some(line) = lines.recv().await {
-                    handle(&line);
+                while let Some((line, cut)) = lines.recv().await {
+                    handle(&line, cut);
                 }
             };
             let _ = tokio::time::timeout(DRAIN, drain).await;
@@ -203,6 +205,13 @@ async fn run_turn(
         }
     };
 
+    let cut = |result: Result<(), String>| match result {
+        Ok(()) if lost => Err(format!(
+            "The agent's output had a line longer than {} MiB, which the bridge cut, so its answer may be missing or incomplete. Ask the agent for a shorter answer, or to write the full text to a file you can read with GET /v1/files/content.",
+            MAX_LINE >> 20
+        )),
+        other => other,
+    };
     if agent.kind == AgentKind::Hermes {
         let (session_id, answer) = agents::parse_hermes_output(&plain, &stderr);
         let mut state = record.state();
@@ -213,14 +222,14 @@ async fn run_turn(
             state.last_message = Some(truncate(answer, MAX_MESSAGE));
             state.last_message_at = Some(SystemTime::now());
         }
-        return if status.success() {
+        return cut(if status.success() {
             Ok(())
         } else {
             Err(failure(&argv[0], &status, &stderr))
-        };
+        });
     }
     match outcome {
-        Some(result) => result,
+        Some(result) => cut(result),
         // Claude and Codex end every turn with a result event; exiting without one is a failure
         // even with exit code 0.
         None if status.success() => Err(format!(
@@ -248,31 +257,30 @@ fn failure(program: &str, status: &std::process::ExitStatus, stderr: &str) -> St
 }
 
 /// Reads one line into `buf` (without the newline), keeping at most `MAX_LINE` bytes of it.
-/// Returns `false` at the end of the stream.
+/// Returns `None` at the end of the stream, otherwise whether the line was cut.
 async fn read_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     buf: &mut Vec<u8>,
-) -> std::io::Result<bool> {
+) -> std::io::Result<Option<bool>> {
     buf.clear();
     let mut seen = false;
+    let mut cut = false;
     loop {
         let chunk = reader.fill_buf().await?;
         if chunk.is_empty() {
-            return Ok(seen);
+            return Ok(seen.then_some(cut));
         }
         seen = true;
-        let (take, done) = match chunk.iter().position(|b| *b == b'\n') {
-            Some(i) => (i + 1, true),
-            None => (chunk.len(), false),
+        let (content, take, done) = match chunk.iter().position(|b| *b == b'\n') {
+            Some(i) => (i, i + 1, true),
+            None => (chunk.len(), chunk.len(), false),
         };
-        let keep = take.min(MAX_LINE.saturating_sub(buf.len()));
+        let keep = content.min(MAX_LINE.saturating_sub(buf.len()));
+        cut |= keep < content;
         buf.extend_from_slice(&chunk[..keep]);
         reader.consume(take);
         if done {
-            if buf.last() == Some(&b'\n') {
-                buf.pop();
-            }
-            return Ok(true);
+            return Ok(Some(cut));
         }
     }
 }
@@ -359,12 +367,12 @@ mod tests {
         let data = format!("short\n{}\nlast", "x".repeat(MAX_LINE + 10));
         let mut reader = BufReader::new(data.as_bytes());
         let mut line = Vec::new();
-        assert!(read_line(&mut reader, &mut line).await.unwrap());
-        assert_eq!(line, b"short");
-        assert!(read_line(&mut reader, &mut line).await.unwrap());
-        assert_eq!(line.len(), MAX_LINE);
-        assert!(read_line(&mut reader, &mut line).await.unwrap());
-        assert_eq!(line, b"last");
-        assert!(!read_line(&mut reader, &mut line).await.unwrap());
+        let cut = read_line(&mut reader, &mut line).await.unwrap();
+        assert_eq!((cut, line.as_slice()), (Some(false), b"short".as_slice()));
+        let cut = read_line(&mut reader, &mut line).await.unwrap();
+        assert_eq!((cut, line.len()), (Some(true), MAX_LINE));
+        let cut = read_line(&mut reader, &mut line).await.unwrap();
+        assert_eq!((cut, line.as_slice()), (Some(false), b"last".as_slice()));
+        assert_eq!(read_line(&mut reader, &mut line).await.unwrap(), None);
     }
 }
