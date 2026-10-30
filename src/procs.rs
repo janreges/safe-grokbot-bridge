@@ -15,6 +15,8 @@ pub struct ProcInfo {
     pub start_time: u64,
     pub name: String,
     pub cmd: Vec<String>,
+    /// The executable file, when the system reports it.
+    pub exe: Option<PathBuf>,
     pub cwd: Option<PathBuf>,
     pub environ: Vec<String>,
 }
@@ -40,6 +42,7 @@ impl Snapshot {
         let kind = ProcessRefreshKind::nothing()
             .without_tasks()
             .with_cmd(UpdateKind::Always)
+            .with_exe(UpdateKind::Always)
             .with_cwd(UpdateKind::Always)
             .with_environ(environ);
         system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
@@ -65,6 +68,7 @@ impl Snapshot {
                         .iter()
                         .map(|a| a.to_string_lossy().into_owned())
                         .collect(),
+                    exe: process.exe().map(Path::to_path_buf),
                     cwd: process.cwd().map(Path::to_path_buf),
                     environ: process
                         .environ()
@@ -157,7 +161,7 @@ const INTERPRETERS: &[&str] = &[
 
 /// Whether a process runs `command`: its executable is that program, or an interpreter runs it as
 /// a script (`node /usr/bin/codex`, `bash /usr/bin/codex.mnt`). An argument of any other program
-/// (`vim codex`) does not count.
+/// (`vim codex`), or a command string (`bash -c '…; claude'`), does not count.
 pub fn runs_command(process: &ProcInfo, command: &str) -> bool {
     let wanted = program_name(command);
     if wanted.is_empty() {
@@ -167,16 +171,49 @@ pub fn runs_command(process: &ProcInfo, command: &str) -> bool {
         Some(first) => program_name(first),
         None => program_name(&process.name),
     };
-    if executable == wanted || program_name(&process.name) == wanted {
-        return true;
+    executable == wanted
+        || program_name(&process.name) == wanted
+        || script(process)
+            .is_some_and(|script| program_name(&script.display().to_string()) == wanted)
+}
+
+/// The files a process runs: its executable and, for an interpreter, its script; canonical.
+pub fn program_files(process: &ProcInfo) -> Vec<PathBuf> {
+    process
+        .exe
+        .iter()
+        .cloned()
+        .chain(script(process))
+        .filter_map(|path| dunce::canonicalize(path).ok())
+        .collect()
+}
+
+/// The script file an interpreter runs: its first operand, when that names an existing file. A
+/// shell given a command (`-c`) runs no script.
+fn script(process: &ProcInfo) -> Option<PathBuf> {
+    let executable = process.cmd.first().map(|first| program_name(first))?;
+    if !INTERPRETERS.contains(&executable.as_str()) {
+        return None;
     }
-    INTERPRETERS.contains(&executable.as_str())
-        && process
-            .cmd
-            .iter()
-            .skip(1)
-            .find(|arg| !arg.starts_with('-'))
-            .is_some_and(|script| program_name(script) == wanted)
+    let args = &process.cmd[1..];
+    let shell = SHELLS.contains(&executable.as_str());
+    if shell && args.iter().any(|arg| is_command_option(arg)) {
+        return None;
+    }
+    let operand = Path::new(args.iter().find(|arg| !arg.starts_with('-'))?);
+    let path = match &process.cwd {
+        Some(cwd) => cwd.join(operand),
+        None => operand.to_path_buf(),
+    };
+    path.is_file().then_some(path)
+}
+
+/// `-c`, alone or in a cluster of short options (`-lc`): the shell runs a command string.
+fn is_command_option(arg: &str) -> bool {
+    arg.len() > 1
+        && arg.starts_with('-')
+        && arg[1..].chars().all(|c| c.is_ascii_alphabetic())
+        && arg.contains('c')
 }
 
 const SHELLS: &[&str] = &[
@@ -227,12 +264,7 @@ pub fn may_read_terminal(process: &ProcInfo) -> bool {
         // POSIX shells: the argument after `-c`, alone or in a cluster of short options (`-lc`).
         _ => args
             .iter()
-            .position(|arg| {
-                arg.len() > 1
-                    && arg.starts_with('-')
-                    && arg[1..].chars().all(|c| c.is_ascii_alphabetic())
-                    && arg.contains('c')
-            })
+            .position(|arg| is_command_option(arg))
             .and_then(|i| args.get(i + 1).cloned()),
     };
     !command.is_some_and(|command| simple_command(&command))
@@ -272,6 +304,7 @@ mod tests {
             start_time: 0,
             name: name.into(),
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
+            exe: None,
             cwd: None,
             environ: vec![],
         }
@@ -283,10 +316,21 @@ mod tests {
             &proc("claude", &["claude", "--model", "opus"]),
             "claude"
         ));
-        assert!(runs_command(
-            &proc("MainThread", &["node", "/usr/bin/codex", "-m", "x"]),
+        // An interpreter running the agent's script: the script must exist.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("codex");
+        let script = script.to_str().unwrap();
+        assert!(!runs_command(
+            &proc("node", &["node", script, "-m", "x"]),
             "codex"
         ));
+        std::fs::write(script, "// launcher").unwrap();
+        let launcher = proc("MainThread", &["node", script, "-m", "x"]);
+        assert!(runs_command(&launcher, "codex"));
+        assert_eq!(
+            program_files(&launcher),
+            [dunce::canonicalize(script).unwrap()]
+        );
         assert!(runs_command(
             &proc("codex", &["/opt/codex/bin/codex"]),
             "/usr/local/bin/codex"
@@ -300,8 +344,14 @@ mod tests {
             "codex"
         ));
         assert!(!runs_command(&proc("bash", &["bash"]), "claude"));
-        // An editor opening a file named like an agent is not that agent.
+        // An editor opening a file named like an agent is not that agent, and neither is a
+        // shell running a command string that mentions it.
         assert!(!runs_command(&proc("vim", &["vim", "codex"]), "codex"));
+        let trap = "trap 'exec bash' EXIT; /opt/claude";
+        assert!(!runs_command(
+            &proc("bash", &["bash", "-c", trap]),
+            "claude"
+        ));
     }
 
     #[test]

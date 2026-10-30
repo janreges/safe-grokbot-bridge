@@ -789,6 +789,7 @@ mod tests {
             start_time,
             name: "codex".into(),
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
+            exe: None,
             cwd: Some(cwd.clone()),
             environ: vec![],
         };

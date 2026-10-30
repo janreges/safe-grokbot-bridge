@@ -734,13 +734,17 @@ impl Sessions {
     }
 
     /// Whether only the agent can receive what is typed into a pane: the pane's program is the
-    /// agent's configured command (trusted to end with the agent, even as a wrapper script), or no
-    /// process between the pane and the agent may read the terminal after its child exits.
+    /// file of the agent's configured command (trusted to end with the agent, even as a wrapper
+    /// script), or no process between the pane and the agent may read the terminal after its
+    /// child exits.
     fn owned_by_agent(&self, ctx: &Context, pane: &Pane, agent: &Agent, agent_pid: u32) -> bool {
-        let launched = ctx
-            .snapshot
-            .get(pane.pid)
-            .is_some_and(|program| procs::runs_command(program, &agent.command));
+        let configured = exec::which_with(&agent.command, &agent.env)
+            .and_then(|path| dunce::canonicalize(path).ok());
+        let launched = configured.is_some_and(|configured| {
+            ctx.snapshot
+                .get(pane.pid)
+                .is_some_and(|program| procs::program_files(program).contains(&configured))
+        });
         launched || !ctx.snapshot.shell_between(pane.pid, agent_pid)
     }
 
