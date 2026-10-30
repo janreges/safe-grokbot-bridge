@@ -148,6 +148,9 @@ pub struct Session {
     /// The process of the tmux pane when the session was looked up.
     #[serde(skip)]
     pane_pid: Option<u32>,
+    /// When the agent's newest turn started (Codex, from its rollout).
+    #[serde(skip)]
+    turn_started_at: Option<String>,
 }
 
 /// Sessions in the workspaces this token may see.
@@ -590,12 +593,25 @@ impl Sessions {
             let Some(&sent) = pending.get(&session.id) else {
                 continue;
             };
-            let answered = session
-                .last_message_at
-                .as_deref()
-                .and_then(|at| humantime::parse_rfc3339_weak(at.trim_end_matches('Z')).ok())
-                .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
-                .is_some_and(|at| at.as_millis() as u64 >= sent);
+            let ms = |at: Option<&str>| {
+                humantime::parse_rfc3339_weak(at?.trim_end_matches('Z'))
+                    .ok()?
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .map(|at| at.as_millis() as u64)
+            };
+            let answer = ms(session.last_message_at.as_deref());
+            let answered = match ms(session.turn_started_at.as_deref()) {
+                // Codex reports when a turn started: the answer must come from a turn that
+                // started after the message was sent, not from one that was running then.
+                Some(started) => {
+                    started >= sent
+                        && session.state != SessionState::Working
+                        && answer.is_some_and(|answer| answer >= started)
+                }
+                // Claude Code takes up a held message as soon as its current turn ends.
+                None => answer.is_some_and(|answer| answer >= sent),
+            };
             if answered {
                 pending.remove(&session.id);
             } else if matches!(session.state, SessionState::Idle | SessionState::Unknown) {
@@ -852,6 +868,7 @@ impl Sessions {
                 if let Some(progress) = external::codex_progress(&thread.rollout) {
                     session.last_message = progress.last_message;
                     session.last_message_at = progress.last_message_at;
+                    session.turn_started_at = progress.turn_started_at;
                 }
             }
             if let Some((text, at)) = claude
@@ -1086,6 +1103,7 @@ impl Sessions {
             if let Some(progress) = progress {
                 session.last_message = progress.last_message;
                 session.last_message_at = progress.last_message_at;
+                session.turn_started_at = progress.turn_started_at;
             }
             session.agent_session_id = Some(thread.id.clone());
             session.controllable = ws.allows(Capability::Input);
@@ -1951,6 +1969,7 @@ impl Session {
             codex_home: None,
             native: false,
             pane_pid: None,
+            turn_started_at: None,
         }
     }
 }
@@ -2116,11 +2135,11 @@ fn claude_began_in(claude_dir: &Path, cwd: &Path, session_id: &str) -> bool {
 }
 
 /// Whether a hook event's input is a text the bridge sent. The hook keeps only the first 4 KiB of
-/// an input and marks the cut.
+/// an input and marks the cut; a shorter input that merely ends like the mark was not cut.
 fn same_input(sent: &str, input: &str) -> bool {
     match input.strip_suffix(hook::TRUNCATED) {
-        Some(start) => sent.trim_start().starts_with(start.trim_start()),
-        None => sent.trim() == input.trim(),
+        Some(start) if start.len() >= 1024 => sent.trim_start().starts_with(start.trim_start()),
+        _ => sent.trim() == input.trim(),
     }
 }
 
@@ -2461,6 +2480,7 @@ mod tests {
         assert!(same_input("fix it\n", "fix it"));
         assert!(!same_input("fix it", "fix that"));
         assert!(!same_input("short", &format!("other{}", hook::TRUNCATED)));
+        assert!(!same_input("anything", hook::TRUNCATED));
     }
 
     #[test]

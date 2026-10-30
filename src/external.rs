@@ -602,12 +602,15 @@ pub struct CodexProgress {
     pub working: Option<bool>,
     pub last_message: Option<String>,
     pub last_message_at: Option<String>,
+    /// When the newest turn started.
+    pub turn_started_at: Option<String>,
 }
 
 pub fn codex_progress(rollout: &Path) -> Option<CodexProgress> {
     let tail = read_tail(rollout, 2 * 1024 * 1024)?;
     let mut working = None;
     let mut last = None;
+    let mut started = None;
     for line in tail.lines().rev() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -619,6 +622,9 @@ pub fn codex_progress(rollout: &Path) -> Option<CodexProgress> {
         match payload["type"].as_str() {
             Some("task_started") => {
                 working.get_or_insert(true);
+                if started.is_none() {
+                    started = Some(entry["timestamp"].as_str().map(str::to_string));
+                }
             }
             Some("task_complete") => {
                 working.get_or_insert(false);
@@ -634,7 +640,7 @@ pub fn codex_progress(rollout: &Path) -> Option<CodexProgress> {
             }
             _ => {}
         }
-        if working.is_some() && last.is_some() {
+        if working.is_some() && last.is_some() && started.is_some() {
             break;
         }
     }
@@ -643,6 +649,7 @@ pub fn codex_progress(rollout: &Path) -> Option<CodexProgress> {
         working,
         last_message,
         last_message_at,
+        turn_started_at: started.flatten(),
     })
 }
 
@@ -848,6 +855,10 @@ mod tests {
         let progress = codex_progress(&rollout).unwrap();
         assert_eq!(progress.working, Some(true));
         assert_eq!(progress.last_message.as_deref(), Some("Done."));
+        assert_eq!(
+            progress.turn_started_at.as_deref(),
+            Some("2026-10-30T08:02:00Z")
+        );
         assert_eq!(
             progress.last_message_at.as_deref(),
             Some("2026-10-30T08:01:00Z")
