@@ -99,13 +99,17 @@ pub fn read_events(file: &Path) -> Vec<TurnEvent> {
         return Vec::new();
     };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    if len > MAX_FILE_READ {
+    let cut = len > MAX_FILE_READ;
+    if cut {
         use std::io::Seek;
         let _ = f.seek(std::io::SeekFrom::Start(len - MAX_FILE_READ));
     }
-    let mut text = String::new();
-    let _ = f.read_to_string(&mut text);
+    let mut bytes = Vec::new();
+    let _ = f.take(MAX_FILE_READ).read_to_end(&mut bytes);
+    let text = String::from_utf8_lossy(&bytes);
+    // Reading from the middle of the file starts inside a line (maybe inside a character).
     text.lines()
+        .skip(usize::from(cut))
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
 }
@@ -175,5 +179,27 @@ mod tests {
         assert_eq!(messages, ["one", "two"]);
         assert!(read_events(&dir.path().join("missing")).is_empty());
         assert_eq!(truncate("ééé", 3), "é\n[… truncated]");
+
+        // A long history is read from its end, even when the cut falls inside a character.
+        let long = dir.path().join("long.jsonl");
+        let old = TurnEvent {
+            at_ms: 1,
+            session_id: None,
+            message: Some("ž".repeat(1000)),
+            input: None,
+        };
+        for _ in 0..1500 {
+            append(&long, &old).unwrap();
+        }
+        let last = TurnEvent {
+            message: Some("last".into()),
+            ..old.clone()
+        };
+        append(&long, &last).unwrap();
+        let events = read_events(&long);
+        assert_eq!(
+            events.last().and_then(|e| e.message.as_deref()),
+            Some("last")
+        );
     }
 }
