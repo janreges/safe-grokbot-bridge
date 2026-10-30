@@ -118,8 +118,16 @@ pub fn list(
             dir.display()
         )));
     }
+    if !ignore_files_safe(dir) {
+        return Err(ApiError::forbidden(format!(
+            "`{}` has a `.gitignore` or `.ignore` that is not a regular file of at most 1 MiB (a link, a pipe or a huge file), so it is not listed. List a subfolder, or read files directly with GET /v1/files/content.",
+            dir.display()
+        )));
+    }
     let depth = depth.clamp(1, MAX_DEPTH);
     let limit = limit.clamp(1, MAX_LIST_LIMIT);
+    let unsafe_folders = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let skipped_folders = unsafe_folders.clone();
     // The rules of every workspace, most specific first, so that an entry is judged by the
     // workspace it belongs to (a nested workspace may forbid what its parent allows).
     let mut rules: Vec<(std::path::PathBuf, bool, DenyRules)> = config
@@ -128,20 +136,31 @@ pub fn list(
         .map(|w| (w.root.clone(), w.allows(Capability::Files), w.deny.clone()))
         .collect();
     rules.sort_by_key(|(root, _, _)| std::cmp::Reverse(root.components().count()));
+    // The walker reads the ignore files of every folder it enters, so a folder is entered only
+    // when they are safe to read. Ignore files of parent folders and `.git/info/exclude`, which
+    // are not checked, are not read.
     let walker = WalkBuilder::new(dir)
         .max_depth(Some(depth))
         .hidden(false)
         .follow_links(false)
         .require_git(false)
+        .parents(false)
+        .git_exclude(false)
         .sort_by_file_path(|a, b| a.cmp(b))
         .filter_entry(move |entry| {
             let path = entry.path();
-            rules
+            let allowed = rules
                 .iter()
                 .find(|(root, _, _)| path.starts_with(root))
                 .is_some_and(|(root, files, deny)| {
                     *files && !deny.matches(path.strip_prefix(root).unwrap_or(path))
-                })
+                });
+            let folder = entry.file_type().is_some_and(|t| t.is_dir());
+            if allowed && folder && !ignore_files_safe(path) {
+                skipped_folders.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return false;
+            }
+            allowed
         })
         .build();
 
@@ -199,6 +218,12 @@ pub fn list(
     if unreadable > 0 {
         notes.push(format!(
             "{unreadable} entries could not be read (for example permission denied), so the listing is incomplete."
+        ));
+    }
+    let unsafe_folders = unsafe_folders.load(std::sync::atomic::Ordering::Relaxed);
+    if unsafe_folders > 0 {
+        notes.push(format!(
+            "{unsafe_folders} folders were left out because their `.gitignore` or `.ignore` is not a regular file of at most 1 MiB."
         ));
     }
     if entries.is_empty() && unreadable == 0 {
@@ -298,6 +323,17 @@ pub fn read(
         truncated: end < total,
         next_start_line: (end < total).then_some(end + 1),
         content,
+    })
+}
+
+/// Whether the ignore files a listing reads in `folder` are small regular files (or absent): a
+/// link to a device or a pipe there would exhaust or block the listing.
+fn ignore_files_safe(folder: &Path) -> bool {
+    [".gitignore", ".ignore"].iter().all(|name| {
+        match std::fs::symlink_metadata(folder.join(name)) {
+            Ok(metadata) => metadata.is_file() && metadata.len() <= 1024 * 1024,
+            Err(err) => err.kind() == std::io::ErrorKind::NotFound,
+        }
     })
 }
 
@@ -457,6 +493,26 @@ mod tests {
             read(ws, &root.join(".env"), 1, 10).unwrap_err().code,
             "denied"
         );
+    }
+
+    /// The walker reads ignore files by itself; a link to a device or a pipe there must not
+    /// reach it.
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_ignore_files_are_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join("ok")).unwrap();
+        std::fs::create_dir_all(root.join("trap")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", root.join("trap/.gitignore")).unwrap();
+        let cfg = workspace(&root);
+        let ws = &cfg.workspaces[0];
+        let listing = list(&cfg, ws, &root, 3, 100, 0).unwrap();
+        let names: Vec<&str> = listing.entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(names.iter().all(|n| !n.contains("trap")), "{names:?}");
+        assert!(listing.note.unwrap().contains("1 folders were left out"));
+        let err = list(&cfg, ws, &root.join("trap"), 1, 10, 0).unwrap_err();
+        assert_eq!(err.code, "forbidden");
     }
 
     #[test]
