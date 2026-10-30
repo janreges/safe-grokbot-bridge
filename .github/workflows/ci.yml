@@ -39,7 +39,11 @@ jobs:
         run: brew install tmux
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked
+      - name: Test
+        run: cargo test --locked
+        env:
+          # Fail instead of skipping the tmux tests where tmux was installed above.
+          SGB_REQUIRE_TMUX: ${{ runner.os != 'Windows' && '1' || '' }}
 
   msrv:
     runs-on: ubuntu-latest
