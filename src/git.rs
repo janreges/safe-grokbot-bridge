@@ -382,7 +382,7 @@ pub async fn repository(dir: &Path) -> Result<Repository, ApiError> {
                 pending.push(objects.join(line));
             }
         }
-        links.extend(linked_storage(&objects));
+        links.extend(linked_storage(&objects, &toplevel)?);
         storage.push(objects);
     }
     storage.extend(links);
@@ -390,19 +390,37 @@ pub async fn repository(dir: &Path) -> Result<Repository, ApiError> {
 }
 
 /// The targets of links in an object store: a loose-object folder, `pack` or a pack file can point
-/// into another repository. (Links to single loose objects are not followed up.)
-fn linked_storage(objects: &Path) -> Vec<PathBuf> {
+/// into another repository. (Links to single loose objects are not followed up.) The store must
+/// be readable completely: git can open a known object behind a link the bridge could not see.
+fn linked_storage(objects: &Path, toplevel: &Path) -> Result<Vec<PathBuf>, ApiError> {
+    let refuse = |dir: &Path, err: std::io::Error| {
+        ApiError::forbidden(format!(
+            "The object store of the repository at {} cannot be inspected ({}: {err}), so git access is refused.",
+            toplevel.display(),
+            dir.display()
+        ))
+    };
     let mut targets = Vec::new();
     for dir in [objects.to_path_buf(), objects.join("pack")] {
-        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-            if entry.file_type().is_ok_and(|t| t.is_symlink())
-                && let Ok(target) = dunce::canonicalize(entry.path())
-            {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            // A repository without packs has no `pack` folder.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound && dir != objects => continue,
+            Err(err) => return Err(refuse(&dir, err)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|err| refuse(&dir, err))?;
+            let link = entry
+                .file_type()
+                .map_err(|err| refuse(&entry.path(), err))?
+                .is_symlink();
+            // A link that leads nowhere cannot be read by git either.
+            if link && let Ok(target) = dunce::canonicalize(entry.path()) {
                 targets.push(target);
             }
         }
     }
-    targets
+    Ok(targets)
 }
 
 /// A repository's list of object alternates, read completely or not at all: an entry the bridge
@@ -693,5 +711,16 @@ mod tests {
             "{:?}",
             repo.storage
         );
+        // An object folder that cannot be listed could hide links, so it is refused.
+        use std::os::unix::fs::PermissionsExt;
+        let objects = borrowed.join(".git/objects");
+        std::fs::set_permissions(&objects, std::fs::Permissions::from_mode(0o111)).unwrap();
+        let refused = repository(&borrowed).await;
+        std::fs::set_permissions(&objects, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Root lists it anyway; for everyone else it is refused.
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            assert_eq!(refused.err().map(|err| err.code), Some("forbidden"));
+        }
     }
 }
