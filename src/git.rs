@@ -271,6 +271,21 @@ async fn filter_overrides(dir: &Path) -> Result<Vec<String>, ApiError> {
         .collect();
     names.sort_unstable();
     names.dedup();
+    // `-c` splits at the first `=`, so such a name cannot be overridden, and a name that was not
+    // valid UTF-8 would be overridden under another name.
+    if let Some(name) = names
+        .iter()
+        .find(|n| n.contains('=') || n.contains('\u{FFFD}'))
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "git_failed",
+            format!(
+                "The repository at {} configures a filter driver named `{name}`, which the bridge cannot disable, so git is not run there.",
+                dir.display()
+            ),
+        ));
+    }
     if !complete || out.truncated || names.len() > 100 {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -339,6 +354,7 @@ pub async fn repository(dir: &Path) -> Result<Repository, ApiError> {
     let common = canonical(&dir.join(common))?;
     let mut storage = vec![canonical(Path::new(git_dir))?, common.clone()];
     let mut pending = vec![common.join("objects")];
+    let mut links = Vec::new();
     while let Some(objects) = pending.pop() {
         // Git skips alternates that do not exist.
         let Ok(objects) = dunce::canonicalize(&objects) else {
@@ -366,9 +382,27 @@ pub async fn repository(dir: &Path) -> Result<Repository, ApiError> {
                 pending.push(objects.join(line));
             }
         }
+        links.extend(linked_storage(&objects));
         storage.push(objects);
     }
+    storage.extend(links);
     Ok(Repository { toplevel, storage })
+}
+
+/// The targets of links in an object store: a loose-object folder, `pack` or a pack file can point
+/// into another repository. (Links to single loose objects are not followed up.)
+fn linked_storage(objects: &Path) -> Vec<PathBuf> {
+    let mut targets = Vec::new();
+    for dir in [objects.to_path_buf(), objects.join("pack")] {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_symlink())
+                && let Ok(target) = dunce::canonicalize(entry.path())
+            {
+                targets.push(target);
+            }
+        }
+    }
+    targets
 }
 
 /// A repository's list of object alternates, read completely or not at all: an entry the bridge
@@ -602,6 +636,22 @@ mod tests {
         run(&parent, diff).await.unwrap();
         assert!(!marker.exists(), "a filter driver ran");
 
+        // A filter driver whose name contains `=` cannot be disabled with `-c`.
+        let mut config = std::fs::OpenOptions::new()
+            .append(true)
+            .open(parent.join(".git").join("config"))
+            .unwrap();
+        writeln!(
+            config,
+            "[filter \"evil=driver\"]\n\tclean = \"sh -c '{touch}; cat'\""
+        )
+        .unwrap();
+        std::fs::write(parent.join(".gitattributes"), "*.txt filter=evil=driver\n").unwrap();
+        std::fs::write(parent.join("b.txt"), "changed once more\n").unwrap();
+        let err = run(&parent, GitRequest::Status).await.unwrap_err();
+        assert!(err.message.contains("evil=driver"), "{}", err.message);
+        assert!(!marker.exists(), "a filter driver named with `=` ran");
+
         // A `.git` file and object alternates are reported as storage, so they can be checked.
         let pointer = root.join("pointer");
         std::fs::create_dir(&pointer).unwrap();
@@ -632,5 +682,16 @@ mod tests {
         std::fs::write(&alternates, format!("{padding}{}\n", private.display())).unwrap();
         let repo = repository(&borrowed).await.unwrap();
         assert!(repo.storage.contains(&private), "{:?}", repo.storage);
+        // So is a pack folder that links into another repository.
+        std::fs::write(&alternates, "").unwrap();
+        let pack = borrowed.join(".git/objects/pack");
+        std::fs::remove_dir_all(&pack).unwrap();
+        std::os::unix::fs::symlink(private.join("pack"), &pack).unwrap();
+        let repo = repository(&borrowed).await.unwrap();
+        assert!(
+            repo.storage.contains(&private.join("pack")),
+            "{:?}",
+            repo.storage
+        );
     }
 }
