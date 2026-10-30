@@ -30,7 +30,8 @@ paste the value into the card it shows. The value is not shown in chat. It is ex
 environment variable to the shell sessions on the bot's cloud computer, so `curl` can use it.
 Grok Bot's *Vault* is for website logins, not for API tokens.
 
-Use one name scheme for all machines; the skill relies on it:
+Use one name scheme for all machines; the skill relies on it. A secret's name holds the
+machine's name in capitals, with `-` written as `_` (`eva-pc` → `SGB_EVA_PC_URL`):
 
 | Secret | Example value |
 |---|---|
@@ -88,7 +89,7 @@ secret, and passes secrets to curl through a pipe, so they do not appear on a co
 
 ```bash
 sgb() { # sgb <machine> <METHOD> <path> [json-file]
-  local m; m=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')
+  local m; m=$(printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_')
   local url="SGB_${m}_URL" tok="SGB_${m}_TOKEN" pin="SGB_${m}_PIN"
   local aid="SGB_${m}_ACCESS_ID" asec="SGB_${m}_ACCESS_SECRET" tls=()
   [ -n "${!pin}" ] && tls=(-k --pinnedpubkey "${!pin}")
