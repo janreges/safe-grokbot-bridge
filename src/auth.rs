@@ -157,7 +157,9 @@ impl Auth {
                 failures.retain(|_, f| f.blocked_until.is_some_and(|until| until > now));
             }
             if failures.len() >= MAX_TRACKED_IPS {
-                failures.clear();
+                // Every tracked address is blocked: keep those blocks and leave this address
+                // untracked rather than lift them all. Tokens cannot be guessed either way.
+                return ApiError::unauthorized();
             }
         }
         let entry = failures.entry(ip).or_insert(Failures {
