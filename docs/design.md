@@ -263,8 +263,12 @@ the file and git endpoints.
 | `DELETE /v1/sessions/{id}` | input | stop a session the bridge started |
 
 Errors use one shape: `{"error": {"code": "<stable_code>", "message": "<what happened and what to
-do>"}}`, returned with statuses 400, 401, 403, 404, 409, 413, 429 (with `Retry-After`), 500 or 503.
-Truncated output always says so (`truncated: true` plus how to get more).
+do>"}}`, returned with statuses 400, 401, 403, 404, 409, 413, 415, 429 (with `Retry-After`), 500,
+502 or 503.
+
+Results never pretend to be complete. Truncated output says so (`truncated: true` plus a way to
+get more, if one exists). A session list whose sources (tmux, `claude agents --json`) failed
+carries `warnings`. Advice only the machine's owner can follow is marked as such.
 
 ### Starting a session
 
@@ -341,7 +345,10 @@ Used for live, interactive sessions. Requires tmux 3.0 or newer, or psmux on Win
   The hook appends one JSON line to `<state_dir>/events/<session>.jsonl` and always exits 0, so it
   can never block an agent.
 - **State:**
-  - Claude: `claude agents --json` (`busy`/`waiting`/`idle` plus `waitingFor`), cached for 2 s.
+  - Claude: `claude agents --json` (`busy`/`waiting`/`idle` plus `waitingFor`), cached for 2 s
+    and refreshed after every start or input. Right after input Claude may still report `idle`,
+    so a turn started by the bridge stays `working` until its Stop hook event arrives. If the
+    pane is quiet for 15 s and Claude says `idle`, the turn counts as done even without an event.
   - Codex: a turn started by the bridge's input is `working` until its hook event arrives. If the
     pane stays quiet for 15 s first, it is `waiting`, typically an approval prompt.
   - Hermes and generic agents: `working` while the pane produced output within the last 3 s
@@ -389,8 +396,10 @@ Sessions running outside tmux, for example in a plain terminal tab or an IDE.
     approval, so set `"crossSessionInbound": "accept"` in those sessions' settings for unattended
     use.
   - Codex: live Codex TUIs found by process scan are matched to their thread through the rollout
-    files of their `CODEX_HOME`. Text is queued with `codex queue --thread <id> --message <text>`,
-    and Codex delivers it when the thread is idle. The last answer is read from the rollout file.
+    files of their `CODEX_HOME`: the thread named by `codex resume <id>`, or else the newest
+    thread in the same folder that started after the process. A TUI that has not started a thread
+    yet is not listed. Text is queued with `codex queue --thread <id> --message <text>`, and Codex
+    delivers it when the thread is idle. The last answer is read from the rollout file.
 
 External sessions have the ids `claude-<session id>` and `codex-<thread id>`. These paths rely
 on formats that are not stable public interfaces. They are isolated in `external.rs` and fail
