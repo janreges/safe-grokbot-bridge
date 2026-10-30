@@ -2236,7 +2236,7 @@
               "string",
               "null"
             ],
-            "description": "First message to the agent, at most 100 000 bytes."
+            "description": "First message to the agent, at most 100 000 bytes (8 000 in tmux, where it travels on\ntmux's command line; send longer text as input once the session runs)."
           },
           "resume": {
             "type": [

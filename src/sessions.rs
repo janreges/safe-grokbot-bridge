@@ -30,6 +30,8 @@ use crate::tmux::{self, Pane, Tmux};
 /// Longest a client may long-poll; stays below Cloudflare's 125 s proxy read timeout.
 pub const MAX_WAIT_SECS: u64 = 90;
 const MAX_TEXT: usize = 100_000;
+/// tmux carries a session's first prompt on its command line, whose messages hold 16 KiB in all.
+const MAX_TMUX_PROMPT: usize = 8_000;
 const MAX_KEYS: usize = 32;
 const MAX_LINES: usize = 2000;
 const DEFAULT_LINES: usize = 200;
@@ -176,7 +178,8 @@ pub struct StartRequest {
     /// `tmux` for a live terminal session (a person can attach to it), `headless` for one
     /// non-interactive run per message. Default: the bridge's configured runner.
     pub runner: Option<RunnerChoice>,
-    /// First message to the agent, at most 100 000 bytes.
+    /// First message to the agent, at most 100 000 bytes (8 000 in tmux, where it travels on
+    /// tmux's command line; send longer text as input once the session runs).
     pub prompt: Option<String>,
     /// Model, passed with the agent's model flag (e.g. `opus`, `gpt-6.1-sol`). Replaces a model
     /// set in the agent's configured `args`.
@@ -1232,6 +1235,16 @@ impl Sessions {
             RunnerChoice::Auto if self.tmux.is_some() => Runner::Tmux,
             RunnerChoice::Auto => Runner::Headless,
         };
+        if runner == Runner::Tmux
+            && request
+                .prompt
+                .as_ref()
+                .is_some_and(|prompt| prompt.len() > MAX_TMUX_PROMPT)
+        {
+            return Err(ApiError::too_large(format!(
+                "In tmux the first prompt travels on tmux's command line, which holds about 16 KB in all, so `prompt` is limited to {MAX_TMUX_PROMPT} bytes there. Start the session without `prompt` and send the text with POST /v1/sessions/{{id}}/input, or use `runner: \"headless\"`."
+            )));
+        }
         if runner == Runner::Tmux && self.tmux.is_none() {
             return Err(ApiError::unavailable(format!(
                 "tmux (`{}`) is not available on this machine. Use `runner: \"headless\"`.",

@@ -342,12 +342,14 @@ Used for live, interactive sessions. Requires tmux 3.0 or newer, or psmux on Win
 
 - **Start:** `tmux new-session -d -s sgb-<dir>-<agent>-<6hex> -c <cwd> -x 200 -y 50 -e KEY=VAL -- /usr/bin/env -u CLAUDECODE … <argv>`.
   The initial prompt is the agent's positional argument (Claude, Codex) or `chat -q` (Hermes),
-  so there is no race with the TUI starting up. Session names are unique, and a human attaches
-  with `tmux attach -t <name>`. A running tmux server hands its own environment to new
-  sessions, and it may come from an agent session or another profile. So the profile variables
-  (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `HERMES_HOME`) are set to the bridge's values, unless the
-  agent's `env` sets them, and the variables of an enclosing agent session are removed. An
-  argument ending in `;` is escaped, because tmux would read it as a command separator.
+  so there is no race with the TUI starting up. tmux limits a command to 16 KiB in all, so a
+  first prompt in tmux has at most 8 000 bytes; longer text goes in as input once the session
+  runs. Session names are unique, and a human attaches with `tmux attach -t <name>`. A running
+  tmux server hands its own environment to new sessions, and it may come from an agent session
+  or another profile. So the profile variables (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+  `HERMES_HOME`) are set to the bridge's values, unless the agent's `env` sets them, and the
+  variables of an enclosing agent session are removed. An argument ending in `;` is escaped,
+  because tmux would read it as a command separator.
 - **Targeting:** the bridge remembers the pane id the agent runs in and the pane's process, and
   always targets that pane. Panes someone adds to a bridge session (a split, a new window) are
   ignored. A pane whose process changed (respawned, for example with a shell) no longer runs the

@@ -120,7 +120,8 @@ sgb pc1 POST /v1/sessions /tmp/start.json
 4. To start a session, `POST /v1/sessions` with `cwd`, `agent` and `prompt`. Optional fields are
    `runner` (`tmux` or `headless`), `model`, `effort`, `keep_alive` and `resume`. The agent knows
    nothing about our conversation, so write a complete prompt: the goal, the context, how to
-   verify the result, and what to report back.
+   verify the result, and what to report back. In tmux, `prompt` holds at most 8 000 bytes; for
+   a longer task, start without `prompt` and send the task as input.
 5. To wait, call `GET /v1/sessions/{id}?wait=60` and repeat while `state` is `working`. A note
    saying "Still working" means keep waiting. It does **not** mean the message was lost.
 6. To read the result: `last_message` is the agent's answer, `screen` is its terminal.
