@@ -23,12 +23,14 @@ on your machine do the rest. By hand:
    user (in WSL 2 enable systemd first: `[boot] systemd=true` in `/etc/wsl.conf`):
 
    ```bash
-   mkdir -p ~/.config/safe-grokbot-bridge
-   (umask 077; read -rsp 'Tunnel token: ' t; echo; printf '%s' "$t" > ~/.config/safe-grokbot-bridge/tunnel-token)
+   mkdir -p -m 700 ~/.config/safe-grokbot-bridge
+   bash -c 'umask 077; read -rsp "Tunnel token: " t && echo && [ -n "$t" ] && rm -f ~/.config/safe-grokbot-bridge/tunnel-token && printf "%s" "$t" > ~/.config/safe-grokbot-bridge/tunnel-token'
    cloudflared tunnel --no-autoupdate run --token-file ~/.config/safe-grokbot-bridge/tunnel-token
    ```
 
    `--token-file` keeps the token off the command line, where other local users could see it.
+   The connector needs outbound access to Cloudflare on port 7844 (TCP or UDP); see Cloudflare's
+   [firewall requirements](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-with-firewall/).
 3. Add a **public hostname**, e.g. `pc1-bridge.example.com`, with service `HTTP` and URL
    `127.0.0.1:4765`.
 4. Test it from another machine:
@@ -122,6 +124,9 @@ ExecStart=%h/.cargo/bin/safe-grokbot-bridge serve
 Restart=on-failure
 # Services get a minimal PATH; include where claude, codex, node and git live.
 Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+# Stop only the bridge itself. It stops its own headless turns, while a tmux server it started
+# runs in this service's control group and must survive restarts and upgrades.
+KillMode=process
 
 [Install]
 WantedBy=default.target
@@ -180,6 +185,21 @@ folders of your agents (`which claude codex`).
 launchctl load ~/Library/LaunchAgents/com.github.janreges.safe-grokbot-bridge.plist
 ```
 
+### When the bridge runs
+
+- **Linux:** the systemd user services above start at boot, without a login, once lingering is
+  enabled.
+- **WSL 2:** the services run while the distribution runs. Windows does not start it at boot,
+  and systemd services do not keep it running. Start it when you log on to Windows with a Task
+  Scheduler task (trigger *At log on*, action `wsl.exe` with the arguments
+  `-d <distribution> --exec sleep infinity`), and leave that task running. The bridge is then
+  reachable while you are logged on to Windows.
+- **macOS:** a launchd agent runs while you are logged in. To have the bridge back after a
+  restart without logging in, turn on automatic login (not available with FileVault). Agents
+  need your user session, Claude Code for example keeps its login in your keychain, so the
+  bridge does not run as a system daemon.
+- **Windows:** the Task Scheduler task below runs while you are logged on.
+
 ### Windows
 
 - Run `safe-grokbot-bridge.exe serve` from Task Scheduler ("At log on", "Run only when user is
@@ -201,5 +221,5 @@ Install one bridge per machine, each with its own host name (e.g. `pc1-bridge.ex
 ## Upgrading
 
 Stop the service, replace the binary, run `safe-grokbot-bridge check`, start the service again.
-tmux sessions keep running during the upgrade. The bridge takes them over again by name on
+tmux sessions keep running during the upgrade (under systemd, thanks to `KillMode=process`). The bridge takes them over again by name on
 start, together with their turn history. Headless turns that were running are stopped.

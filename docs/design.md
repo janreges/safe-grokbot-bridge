@@ -549,6 +549,9 @@ Not checked by hand: native Windows with psmux, and macOS.
 ## 12. Operational notes
 
 - Run the bridge as the same OS user that runs the agents and owns the tmux server.
+- Under systemd, give the bridge's unit `KillMode=process`. A tmux server the bridge started runs
+  in the unit's control group, and by default stopping the unit would end it with every session.
+  The bridge stops its own headless turns when it stops.
 - Under systemd, launchd or Windows services, `PATH` is minimal. Use absolute `command` paths or
   set `PATH`, and run `safe-grokbot-bridge check` with the same environment.
 - Binding port 443 on Linux needs `CAP_NET_BIND_SERVICE`, or a firewall redirect from 443 to the

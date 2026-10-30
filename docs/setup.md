@@ -39,7 +39,9 @@ sequenceDiagram
   values into environment variables.
 - A **Cloudflare account** with a domain whose DNS is on Cloudflare. The free plan is enough.
 - The **machine**: Linux, WSL 2 or macOS, with Claude Code or Codex logged in, plus `tmux` (for
-  live sessions) and `git`. For native Windows see [deployment](deployment.md#windows).
+  live sessions) and `git`. For native Windows see [deployment](deployment.md#windows). It needs
+  no open inbound port, but `cloudflared` connects out to Cloudflare on port **7844** (TCP or
+  UDP): a firewall that allows only outbound 443 blocks the tunnel.
 - Pick a **name** for the machine and a **host name** for its bridge. The examples use `pc1` and
   `pc1-bridge.example.com`. Replace them everywhere.
 
@@ -51,7 +53,8 @@ Create an API token that can manage tunnels and DNS, and nothing else:
    Token**.
 2. Permissions:
    - *Account* · *Cloudflare Tunnel* · *Edit*
-   - *Zone* · *DNS* · *Edit*, with *Zone Resources* set to your domain only
+   - *Zone* · *Zone* · *Read* and *Zone* · *DNS* · *Edit*, with *Zone Resources* set to your
+     domain only
    - optional, for the second factor in step 5: *Account* · *Access: Apps and Policies* · *Edit*
      and *Account* · *Access: Service Tokens* · *Edit*
 3. Copy the token. Also copy your **Account ID** (on the account's overview page).
@@ -114,9 +117,12 @@ the token, then run this in a terminal on the machine and paste the token at the
 is echoed or saved in any history:
 
 ```bash
-mkdir -p ~/.config/safe-grokbot-bridge
-(umask 077; read -rsp 'Tunnel token: ' t; echo; printf '%s' "$t" > ~/.config/safe-grokbot-bridge/tunnel-token)
+mkdir -p -m 700 ~/.config/safe-grokbot-bridge
+bash -c 'umask 077; read -rsp "Tunnel token: " t && echo && [ -n "$t" ] && rm -f ~/.config/safe-grokbot-bridge/tunnel-token && printf "%s" "$t" > ~/.config/safe-grokbot-bridge/tunnel-token'
 ```
+
+The command runs in Bash also from zsh, the default shell on macOS. Only you can read the file,
+and nothing is written when the input is empty.
 
 **3b. Let your coding agent do the rest.** Start Claude Code or Codex in your home folder and
 paste this prompt. Replace the host name and fill in the folders you want to expose:
@@ -139,22 +145,25 @@ Steps:
    `cargo install --locked --git https://github.com/janreges/safe-grokbot-bridge`.
    Put the binary on my PATH and check `safe-grokbot-bridge --version`.
 2. Install cloudflared from Cloudflare's official packages for this OS, as described on
-   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+   https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/
    Check `cloudflared --version`.
-3. Create the config without showing the token:
-   `safe-grokbot-bridge init --workspace <first folder> > ~/.config/safe-grokbot-bridge/bridge-token.txt`
-   then `chmod 600` that file. Edit the config file it created (`safe-grokbot-bridge check`
-   prints its path): keep `listen = "127.0.0.1:4765"`, and set these workspaces:
+3. Create the config without showing the token, so that the token file is private from the
+   start:
+   `(umask 077; rm -f ~/.config/safe-grokbot-bridge/bridge-token.txt; safe-grokbot-bridge init --workspace <first folder> > ~/.config/safe-grokbot-bridge/bridge-token.txt)`
+   Edit the config file it created (`safe-grokbot-bridge check` prints its path): keep
+   `listen = "127.0.0.1:4765"`, and set these workspaces:
    - /home/me/projects: allow files, git, sessions, input, start; allow_bypass_permissions = false
    The config file explains every option; the full reference is docs/configuration.md in the
    repository.
 4. Run `safe-grokbot-bridge check` until it prints OK.
-5. Run both programs as services of my user that start at boot (systemd user units on Linux and
-   WSL 2 with `loginctl enable-linger`, launchd agents on macOS; WSL 2 needs systemd enabled in
-   /etc/wsl.conf):
-   - `safe-grokbot-bridge serve`, with a PATH that contains claude, codex, node, git and tmux;
+5. Run both programs as services of my user, as in the section "Running as a service" of
+   docs/deployment.md in the repository: systemd user units with `loginctl enable-linger` on
+   Linux and WSL 2 (WSL 2 needs systemd enabled in /etc/wsl.conf), launchd agents on macOS.
+   - `safe-grokbot-bridge serve`, with a PATH that contains claude, codex, node, git and tmux,
+     and `KillMode=process` in its systemd unit, so that its tmux sessions survive restarts;
    - `cloudflared tunnel --no-autoupdate run --token-file ~/.config/safe-grokbot-bridge/tunnel-token`
      (an absolute path; the token must not appear on a command line).
+   On WSL 2 and macOS, tell me what else keeps them running after a reboot (same section).
 6. Verify, and show me the output:
    - `curl -s http://127.0.0.1:4765/healthz` and `curl -s https://pc1-bridge.example.com/healthz`
      both print `ok`;
@@ -164,6 +173,10 @@ Steps:
 
 The agent asks before it uses `sudo`. On Linux, `cloudflared` from Cloudflare's package
 repository needs it once for the installation.
+
+On Linux the two services start with the machine. A WSL 2 distribution runs only while Windows
+keeps it running, and macOS starts them when you log in: see [when the bridge
+runs](deployment.md#when-the-bridge-runs).
 
 ## Step 4: Connect Grok Bot to the bridge
 
@@ -229,6 +242,7 @@ and add a row to the skill's machines table. Step 1 is needed only once.
 | Symptom | Check |
 |---|---|
 | `530` or `1033` from the host name | The tunnel has no connector: `cloudflared` is not running on the machine, or the token file is wrong. Read its service log. |
+| `cloudflared` logs timeouts or `failed to dial` | A firewall blocks outbound port 7844 (TCP and UDP) to Cloudflare. Allow it; see Cloudflare's [firewall requirements](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-with-firewall/). |
 | `502` from the host name | `cloudflared` runs, but the bridge does not answer on `127.0.0.1:4765`: is its service running, and is `listen` unchanged? |
 | `401 unauthorized` | Grok uses a wrong token. Compare the secret with the token you created; create a new one with `safe-grokbot-bridge token` if it is lost. |
 | `429` with `Retry-After` | Too many failed attempts from the bot's address, or too many requests. Wait as long as `Retry-After` says. |
