@@ -263,3 +263,7 @@ Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## License
 
 [MIT](LICENSE)
+
+safe-grokbot-bridge is an independent project. It is not affiliated with, endorsed by or
+sponsored by xAI, Cursor, Anthropic, OpenAI, Nous Research or Cloudflare. Grok, Cursor, Claude,
+Claude Code, Codex, Hermes and Cloudflare are trademarks of their respective owners.
