@@ -255,25 +255,35 @@ impl Agent {
     }
 }
 
-/// Removes `name value` and `name=value` occurrences of the given options.
+/// Removes `name value` and `name=value` occurrences of the given options, and the attached
+/// `-mvalue` form of a short option.
 fn strip_option(args: &[String], names: &[&str]) -> Vec<String> {
     let mut out = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
+        let attached = names.iter().any(|n| {
+            arg.starts_with(&format!("{n}="))
+                || (n.len() == 2 && !n.starts_with("--") && arg.len() > 2 && arg.starts_with(n))
+        });
         if names.contains(&arg.as_str()) {
             iter.next();
-        } else if !names.iter().any(|n| arg.starts_with(&format!("{n}="))) {
+        } else if !attached {
             out.push(arg.clone());
         }
     }
     out
 }
 
-/// Removes Codex `-c key=…` / `--config key=…` overrides of one key.
+/// Removes Codex `-c key=…`, `-ckey=…`, `--config key=…` and `--config=key=…` overrides of one
+/// key.
 fn strip_config(args: &[String], key: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let prefix = format!("{key}=");
     for arg in args {
+        let attached = [format!("-c{prefix}"), format!("--config={prefix}")];
+        if attached.iter().any(|a| arg.starts_with(a.as_str())) {
+            continue;
+        }
         if arg.starts_with(&prefix)
             && out
                 .last()
@@ -684,6 +694,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(argv, ["claude", "--strict-mcp-config", "--model", "haiku"]);
+    }
+
+    #[test]
+    fn configured_options_in_attached_form_are_replaced_too() {
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        assert_eq!(
+            strip_option(
+                &args(&["-mgpt-x", "--strict", "-m", "y", "--model=z"]),
+                &["--model", "-m"]
+            ),
+            args(&["--strict"])
+        );
+        assert_eq!(
+            strip_config(
+                &args(&[
+                    "-cmodel_reasoning_effort=high",
+                    "--config=model_reasoning_effort=low",
+                    "-c",
+                    "other=1"
+                ]),
+                "model_reasoning_effort"
+            ),
+            args(&["-c", "other=1"])
+        );
     }
 
     #[test]
