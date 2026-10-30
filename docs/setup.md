@@ -140,13 +140,13 @@ Rules:
 
 Steps:
 1. Install safe-grokbot-bridge: the archive for this OS and CPU from the latest release of
-   https://github.com/janreges/safe-grokbot-bridge (check its .sha256 file; if the repository is
-   private, use `gh release download`), or build it with
+   https://github.com/janreges/safe-grokbot-bridge (for example with `gh release download`;
+   check its .sha256 file), or build it with
    `cargo install --locked --git https://github.com/janreges/safe-grokbot-bridge`.
    Put the binary on my PATH and check `safe-grokbot-bridge --version`.
 2. Install cloudflared from Cloudflare's official packages for this OS, as described on
    https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/
-   Check `cloudflared --version`.
+   Check `cloudflared --version`: `--token-file` below needs 2025.4.0 or newer.
 3. Create the config without showing the token, so that the token file is private from the
    start:
    `(umask 077; rm -f ~/.config/safe-grokbot-bridge/bridge-token.txt; safe-grokbot-bridge init --workspace <first folder> > ~/.config/safe-grokbot-bridge/bridge-token.txt)`

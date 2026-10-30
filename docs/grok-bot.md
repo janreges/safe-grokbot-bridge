@@ -83,8 +83,8 @@ Access service token); the helper below sends them when they exist.
 
 ## Calling the API
 
-Define this helper in your shell (once per shell session). It never prints a secret, and passes
-secrets to curl through a pipe, so they do not appear on a command line:
+Define this helper in your shell (once per shell session; it needs `bash`). It never prints a
+secret, and passes secrets to curl through a pipe, so they do not appear on a command line:
 
 ```bash
 sgb() { # sgb <machine> <METHOD> <path> [json-file]
@@ -152,12 +152,14 @@ sgb pc1 POST /v1/sessions /tmp/start.json
 - **Bypass only when asked.** Use `bypass_permissions: true` only when I asked for it, or when the
   workspace is clearly meant for it. Otherwise answer permission prompts deliberately.
 - **Do not stop what you did not start.** Stop sessions you started with `DELETE` when they are
-  no longer needed. Leave my sessions alone unless I ask.
+  no longer needed; a headless session counts against the machine's session limit until then.
+  Leave my sessions alone unless I ask.
 - **Errors:** read `error.message`, it says what to do.
   - `401`: wrong or missing token. Check the secret name, then tell me.
   - `403`: not allowed in that folder. Do not retry; tell me.
   - `409 busy`: a turn is still running. Wait first.
-  - `409 path_changed`: the file changed while it was read. Retry once.
+  - `409 path_changed`: a file changed while it was read (retry once), or the folder of a
+    headless session was replaced (start a new session).
   - `429`: wait `Retry-After` seconds.
   - `503`, `agent_exited`, `delivery_failed`: tell me; retrying the same call will not help.
 - **Incomplete lists:** if a session list has `warnings`, some sources failed. Do not conclude that

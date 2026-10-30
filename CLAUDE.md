@@ -80,6 +80,7 @@ A test fails when `docs/openapi.json` is out of date, so regenerate it after any
 | `src/tls.rs` | Self-signed certificate generation, persistence, key pin |
 | `src/auth.rs` | Bearer tokens, auth-failure lockout, rate limiting, client IP |
 | `src/api.rs` | HTTP handlers, request/response types, OpenAPI document |
+| `src/error.rs` | `ApiError`: stable error codes and messages for HTTP responses |
 | `src/paths.rs` | Mapping paths to workspaces, capability checks, deny patterns |
 | `src/files.rs`, `src/git.rs` | Read-only file and git access |
 | `src/agents.rs` | Everything agent-specific: command lines, flags, output parsing |

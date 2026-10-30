@@ -43,8 +43,10 @@ These facts were verified in October 2026:
 - Grok Bot stores API tokens in a *secure secret card*. The value is exported as an environment
   variable to every shell session on the cloud computer and is not shown in chat. All of a user's
   bots share that computer, so a token there is shared by all of them.
-- Grok Bot's custom MCP connectors are called from Cursor's backend, not from the cloud computer.
-  Plain REST over `curl` is the simplest reliable path.
+- Grok Bot is xAI's agent product, operated by Cursor: its cloud computers run in Cursor's cloud,
+  routines are triggered through Cursor's webhook endpoint, and custom MCP connectors are called
+  from Cursor's backend, not from the cloud computer. Plain REST over `curl` from the cloud
+  computer is the simplest reliable path.
 - Cloudflare's proxy read timeout is 125 s, so long-polling is capped at 90 s.
 - Claude Code (2.1.3xx) offers `claude agents --json` as the supported way to read session state
   from outside. Per-session hooks can be injected with `--settings`, and every session binds an
@@ -106,7 +108,8 @@ OpenAPI 3.1 document generated from the code. The module tree is flat; see the l
 State directory: `[server] state_dir`, defaulting to the platform data dir
 (`~/.local/share/safe-grokbot-bridge` on Linux,
 `~/Library/Application Support/safe-grokbot-bridge` on macOS,
-`%LOCALAPPDATA%\safe-grokbot-bridge` on Windows). It is created with mode `0700` on Unix.
+`%LOCALAPPDATA%\safe-grokbot-bridge` on Windows). Its subfolders, which hold the TLS key, turn
+events and the texts recently sent to tmux sessions, are created with mode `0700` on Unix.
 
 ## 5. Configuration
 
@@ -141,6 +144,7 @@ max_sessions = 8                      # live sessions started by the bridge
 [sessions]
 runner = "auto"                       # default for new sessions: auto | tmux | headless
 tmux = "tmux"                         # tmux-compatible binary (psmux on Windows)
+# tmux_socket = "sgb"                 # a dedicated tmux server (`tmux -L sgb`)
 max_turn_secs = 3600                  # headless turn timeout
 
 [experimental]
@@ -250,7 +254,9 @@ key.
 **Command lines are visible locally.** The first prompt of a tmux session is passed on the
 agent's command line, and so are messages queued for external Codex sessions (`codex queue`). On
 a machine shared with other local users, they can read these with `ps`. Headless prompts and
-input to running tmux sessions go through stdin and paste buffers instead.
+input to running tmux sessions go through stdin and paste buffers instead. The last ten texts
+sent to each tmux session are also kept in the state folder (mode `0700`), until the session's
+data is removed an hour after it ended.
 
 **Listings follow paths.** A file is read through a handle that must still be the authorized
 file, but a listing walks folders by path. If someone with write access to a workspace replaces
@@ -369,7 +375,8 @@ Used for live, interactive sessions. Requires tmux 3.0 or newer, or psmux on Win
   own messaging instead (§8.4).
 - **Restarts:** bridge-named sessions (`sgb-…`, including those from
   `safe-grokbot-bridge launch`) are adopted at start and on sight, unless an interactive shell
-  sits between the pane and the agent. Their `keep_alive` setting and the last input are kept in
+  sits between the pane and the agent. Their `keep_alive` setting, the time of the last input
+  and the last ten texts sent to them (Codex's main thread is recognized by them) are kept in
   `<state_dir>/sessions/<id>.json`, so a `keep_alive: false` session is still closed after its
   answer. Turn events and saved data of sessions that ended while the bridge was stopped are
   removed at start, once the retention period has passed.
@@ -383,7 +390,7 @@ Used for live, interactive sessions. Requires tmux 3.0 or newer, or psmux on Win
   waits until the pane content changes, then presses `Enter`. Copy mode is cancelled first. One
   request's paste, `Enter` and keys are not interleaved with another request's.
 - **Keys:** an allowlist of tmux key names (`Enter`, `Escape`, `Tab`, `BTab`, `Up`, `Down`,
-  `Left`, `Right`, `PageUp`, `PageDown`, `Home`, `End`, `Space`, `BSpace`, `C-c`, `C-d`) plus
+  `Left`, `Right`, `PageUp`, `PageDown`, `Home`, `End`, `Space`, `BSpace`, `DC`, `C-c`, `C-d`) plus
   single printable characters. This lets a client answer permission prompts and menus.
 - **Output:** `capture-pane -p -J -S -<lines>`.
 - **Turn tracking (hooks):** bridge-started Claude and Codex sessions get a per-session hook that

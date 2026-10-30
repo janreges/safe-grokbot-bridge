@@ -29,6 +29,7 @@ on your machine do the rest. By hand:
    ```
 
    `--token-file` keeps the token off the command line, where other local users could see it.
+   It needs `cloudflared` 2025.4.0 or newer.
    The connector needs outbound access to Cloudflare on port 7844 (TCP or UDP); see Cloudflare's
    [firewall requirements](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-with-firewall/).
 3. Add a **public hostname**, e.g. `pc1-bridge.example.com`, with service `HTTP` and URL
@@ -117,7 +118,6 @@ sessions must live in that user's tmux server.
 ```ini
 [Unit]
 Description=safe-grokbot-bridge
-After=network-online.target
 
 [Service]
 ExecStart=%h/.cargo/bin/safe-grokbot-bridge serve
@@ -147,7 +147,6 @@ The tunnel connector can run the same way, as
 ```ini
 [Unit]
 Description=Cloudflare Tunnel for safe-grokbot-bridge
-After=network-online.target
 
 [Service]
 ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate run --token-file %h/.config/safe-grokbot-bridge/tunnel-token

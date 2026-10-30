@@ -85,7 +85,7 @@ allow = ["files", "git", "sessions"]
 | `listen` | `127.0.0.1:4765` | Address and port. A non-loopback address requires `[server.tls]`; the bridge refuses to start otherwise. |
 | `name` | host name | Name reported in `GET /v1/info`. |
 | `client_ip_header` | `cf-connecting-ip` | Header holding the real client IP when a proxy on the same machine forwards the request. It is used only when the TCP peer is a loopback address, so remote clients cannot forge it. It must hold a single IP (e.g. `CF-Connecting-IP`, `X-Real-IP`); the bridge logs a warning once when it holds something else, such as an `X-Forwarded-For` list. `""` disables it. |
-| `state_dir` | platform data dir | TLS key pair and session turn events. Created with mode `0700` on Unix. A relative path is relative to the config file's folder. |
+| `state_dir` | platform data dir | TLS key pair, session turn events and the texts recently sent to tmux sessions, each in a subfolder created with mode `0700` on Unix. A relative path is relative to the config file's folder. |
 
 ### `[server.tls]`
 
