@@ -12,7 +12,8 @@ use common::{Harness, harness, script, toml_str};
 use serde_json::{Value, json};
 
 /// A stand-in for `claude -p --output-format stream-json`: answers `echo: <prompt>`, logs its
-/// arguments, fails on the prompt `fail` and hangs (after writing its pid) on `slow`.
+/// arguments, fails on the prompt `fail`, hangs (after writing its pid) on `slow` and leaves a
+/// background process behind on `spawn`.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 if [ "$1" = "agents" ]; then echo '[]'; exit 0; fi
 echo "$@" >> "$ARGS_LOG"
@@ -27,6 +28,7 @@ if [ "$prompt" = "fail" ]; then
   exit 1
 fi
 if [ "$prompt" = "slow" ]; then echo $$ > "$ARGS_LOG.pid"; sleep 30; fi
+if [ "$prompt" = "spawn" ]; then sleep 300 & echo $! > "$ARGS_LOG.child"; fi
 printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$sid"
 printf '{"type":"assistant","message":{"content":[{"type":"text","text":"working on %s"}]}}\n' "$prompt"
 printf '{"type":"result","subtype":"success","is_error":false,"result":"echo: %s","session_id":"%s"}\n' "$prompt" "$sid"
@@ -128,9 +130,10 @@ async fn concurrent_messages_start_only_one_turn() {
         .await;
     let id = started["id"].as_str().unwrap().to_string();
     let uri = format!("/v1/sessions/{id}/input");
+    // A slow turn keeps running while the second request arrives, however late it is.
     let (a, b) = tokio::join!(
-        h.post(&uri, json!({"text": "one"})),
-        h.post(&uri, json!({"text": "two"}))
+        h.post(&uri, json!({"text": "slow"})),
+        h.post(&uri, json!({"text": "slow"}))
     );
     let mut statuses = [a.0, b.0];
     statuses.sort();
@@ -139,9 +142,16 @@ async fn concurrent_messages_start_only_one_turn() {
         [StatusCode::OK, StatusCode::CONFLICT],
         "{a:?} {b:?}"
     );
-    wait_idle(&h, &id).await;
+    let pid_file = PathBuf::from(format!("{}.pid", log.display()));
+    for _ in 0..50 {
+        if pid_file.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     let runs = std::fs::read_to_string(&log).unwrap().lines().count();
     assert_eq!(runs, 1);
+    h.delete(&format!("/v1/sessions/{id}")).await;
 }
 
 #[tokio::test]
@@ -196,19 +206,40 @@ async fn keep_alive_false_finishes_after_the_first_answer_and_stop_kills_a_turn(
     assert_eq!(status, StatusCode::OK, "{stopped}");
     assert_eq!(stopped["state"], "exited");
     // The agent process itself is gone, not just reported as stopped.
-    let alive = || {
-        std::process::Command::new("kill")
-            .args(["-0", &pid])
-            .status()
-            .is_ok_and(|s| s.success())
-    };
     for _ in 0..50 {
-        if !alive() {
+        if !alive(&pid) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(!alive(), "the turn's process {pid} still runs");
+    assert!(!alive(&pid), "the turn's process {pid} still runs");
+}
+
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[tokio::test]
+async fn a_finished_turn_leaves_no_processes_behind() {
+    let Headless { h, log, _bin } = headless_harness().await;
+    let (_, started) = h
+        .post(
+            "/v1/sessions",
+            json!({"cwd": h.root, "agent": "claude", "prompt": "spawn"}),
+        )
+        .await;
+    let id = started["id"].as_str().unwrap().to_string();
+    let done = wait_idle(&h, &id).await;
+    assert_eq!(done["state"], "idle", "{done}");
+    assert_eq!(done["last_message"], "echo: spawn");
+    let child = std::fs::read_to_string(format!("{}.child", log.display())).unwrap();
+    assert!(
+        !alive(child.trim()),
+        "the turn's background process still runs"
+    );
 }
 
 #[tokio::test]

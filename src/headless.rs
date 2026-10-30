@@ -5,7 +5,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use crate::agents::{self, Launch, StreamEvent};
@@ -101,12 +101,7 @@ async fn run_turn(
         });
     }
     let stderr = child.stderr.take().expect("stderr is piped");
-    let stderr_task = tokio::spawn(async move {
-        exec::read_capped(stderr, 1024 * 1024)
-            .await
-            .map(|(bytes, _)| tail(&bytes))
-            .unwrap_or_default()
-    });
+    let mut stderr_task = tokio::spawn(read_tail(stderr));
     // Lines are read in their own task and passed over a channel: receiving is cancel-safe, so
     // no partly read line is lost when the exit status arrives first.
     let mut stdout = BufReader::new(child.stdout.take().expect("stdout is piped"));
@@ -164,6 +159,12 @@ async fn run_turn(
                 exited = child.wait() => break exited,
             }
         };
+        // The agent has exited. Whatever it left running in its process group would outlive
+        // the turn unnoticed (and hold its pipes open), so it is stopped too.
+        #[cfg(unix)]
+        if let Some(pid) = pid {
+            terminate_tree(pid).await;
+        }
         // The output may still be in flight, or a descendant that escaped the process group may
         // keep stdout open: take what arrives within a short grace period.
         if open {
@@ -179,7 +180,11 @@ async fn run_turn(
     let finished = tokio::time::timeout(Duration::from_secs(max_secs), turn).await;
     reader.abort();
     let status = match finished {
-        Ok(status) => status.map_err(|err| format!("Waiting for the agent failed: {err}"))?,
+        Ok(Ok(status)) => status,
+        Ok(Err(err)) => {
+            stderr_task.abort();
+            return Err(format!("Waiting for the agent failed: {err}"));
+        }
         Err(_) => {
             if let Some(pid) = pid {
                 kill_tree(pid);
@@ -190,9 +195,12 @@ async fn run_turn(
             ));
         }
     };
-    let stderr = match tokio::time::timeout(DRAIN, stderr_task).await {
+    let stderr = match tokio::time::timeout(DRAIN, &mut stderr_task).await {
         Ok(Ok(text)) => text,
-        _ => String::new(),
+        _ => {
+            stderr_task.abort();
+            String::new()
+        }
     };
 
     if agent.kind == AgentKind::Hermes {
@@ -269,9 +277,19 @@ async fn read_line<R: AsyncBufRead + Unpin>(
     }
 }
 
-fn tail(bytes: &[u8]) -> String {
-    let start = bytes.len().saturating_sub(STDERR_TAIL);
-    String::from_utf8_lossy(&bytes[start..]).into_owned()
+/// Reads a stream to its end and keeps the last `STDERR_TAIL` bytes: errors and Hermes's
+/// `session_id:` line come last.
+async fn read_tail<R: AsyncRead + Unpin>(mut reader: R) -> String {
+    let mut tail = Vec::new();
+    let mut chunk = [0u8; 8192];
+    while let Ok(n @ 1..) = reader.read(&mut chunk).await {
+        tail.extend_from_slice(&chunk[..n]);
+        if tail.len() > 2 * STDERR_TAIL {
+            tail.drain(..tail.len() - STDERR_TAIL);
+        }
+    }
+    let start = tail.len().saturating_sub(STDERR_TAIL);
+    String::from_utf8_lossy(&tail[start..]).into_owned()
 }
 
 fn truncate(mut text: String, max: usize) -> String {
@@ -298,8 +316,8 @@ pub async fn terminate_tree(pid: u32) {
         let pgid = pid as libc::pid_t;
         // SAFETY: killpg only sends a signal; signal 0 just checks whether the group exists.
         // An outdated pid fails harmlessly with ESRCH.
-        unsafe {
-            libc::killpg(pgid, libc::SIGTERM);
+        if unsafe { libc::killpg(pgid, libc::SIGTERM) } != 0 {
+            return;
         }
         for _ in 0..30 {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -327,6 +345,14 @@ pub async fn terminate_tree(pid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stderr_keeps_its_real_end() {
+        let data = format!("{}\nsession_id: 20261030_abc\n", "noise ".repeat(400_000));
+        let tail = read_tail(data.as_bytes()).await;
+        assert!(tail.len() <= STDERR_TAIL);
+        assert!(tail.ends_with("session_id: 20261030_abc\n"));
+    }
 
     #[tokio::test]
     async fn long_lines_are_capped_and_lines_split() {
