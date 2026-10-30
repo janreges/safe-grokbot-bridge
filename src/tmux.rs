@@ -85,13 +85,14 @@ impl Tmux {
     /// Arguments that select the server, for commands shown to people (`tmux -L x attach …`).
     pub fn attach_command(&self, session: &str) -> String {
         let session = shell_quote(session);
+        // PowerShell runs a quoted program only with the call operator.
+        let bin = match shell_quote(&self.bin) {
+            quoted if cfg!(windows) && quoted.starts_with('\'') => format!("& {quoted}"),
+            bin => bin,
+        };
         match &self.socket {
-            Some(socket) => format!(
-                "{} -L {} attach -t {session}",
-                self.bin,
-                shell_quote(socket)
-            ),
-            None => format!("{} attach -t {session}", self.bin),
+            Some(socket) => format!("{bin} -L {} attach -t {session}", shell_quote(socket)),
+            None => format!("{bin} attach -t {session}"),
         }
     }
 
@@ -231,10 +232,11 @@ impl Tmux {
     }
 }
 
-/// The `-e` options and the command of a new session's pane. A running tmux server passes its own
-/// environment to new sessions, and that environment may come from an agent session
-/// (`CLAUDECODE` makes Claude Code refuse to start) or name another profile. So the profile
-/// variables are set to the bridge's values and the rest are removed when the pane starts.
+/// What follows the options of `new-session`: the pane's command and its environment. A running
+/// tmux server passes its own environment to new sessions, and that environment may come from an
+/// agent session (`CLAUDECODE` makes Claude Code refuse to start) or name another profile. So the
+/// profile variables are set to the bridge's values and the rest are removed when the pane
+/// starts. On Unix this goes through `env`, which also works with tmux before 3.2 (no `-e`).
 fn pane_command(env: &[(String, String)], argv: &[String]) -> Vec<String> {
     let mut env = env.to_vec();
     let mut unset: Vec<&str> = Vec::new();
@@ -254,15 +256,17 @@ fn pane_command(env: &[(String, String)], argv: &[String]) -> Vec<String> {
             .filter(|var| !var.starts_with("TMUX")),
     );
     let mut args = Vec::new();
-    for (key, value) in env {
-        args.extend(["-e".to_string(), format!("{key}={value}")]);
-    }
-    args.push("--".into());
     if cfg!(unix) {
-        args.push("/usr/bin/env".into());
+        args.extend(["--".to_string(), "/usr/bin/env".to_string()]);
         for var in unset {
             args.extend(["-u".to_string(), var.to_string()]);
         }
+        args.extend(env.iter().map(|(key, value)| format!("{key}={value}")));
+    } else {
+        for (key, value) in env {
+            args.extend(["-e".to_string(), format!("{key}={value}")]);
+        }
+        args.push("--".into());
     }
     args.extend(argv.iter().map(|arg| escape_separator(arg)));
     args
@@ -316,11 +320,14 @@ mod tests {
         let env = [("CODEX_HOME".to_string(), "/p".to_string())];
         let argv = ["/bin/codex".to_string(), "go;".to_string()];
         let args = pane_command(&env, &argv);
-        assert!(args.windows(2).any(|w| w == ["-e", "CODEX_HOME=/p"]));
         assert_eq!(args[args.len() - 2..], ["/bin/codex", "go\\;"]);
         if cfg!(unix) {
+            assert_eq!(args[..2], ["--", "/usr/bin/env"]);
             assert!(args.windows(2).any(|w| w == ["-u", "CLAUDECODE"]));
+            assert!(args.contains(&"CODEX_HOME=/p".to_string()));
             assert!(!args.iter().any(|a| a == "TMUX"));
+        } else {
+            assert!(args.windows(2).any(|w| w == ["-e", "CODEX_HOME=/p"]));
         }
     }
 }
