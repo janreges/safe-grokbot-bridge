@@ -558,6 +558,10 @@ Codex CLI 0.166.0, tmux 3.4) these passed:
 - a running Codex TUI matched to its own thread, next to finished sessions in the same folder;
 - a bridge restart with a running tmux session, which kept its state and took input afterwards.
 
+For 0.2, Hermes Agent 0.21.1 passed these: a headless turn and a follow-up that remembers it,
+resuming the conversation in the same folder and refusing it from another, refusing to resume a
+conversation saved in YOLO mode without `bypass_permissions`, and a tmux session with a prompt.
+
 Not checked by hand: native Windows with psmux, and macOS.
 
 ## 12. Operational notes
