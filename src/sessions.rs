@@ -146,6 +146,9 @@ pub struct Session {
 #[derive(Serialize, ToSchema, Debug)]
 pub struct SessionList {
     pub sessions: Vec<Session>,
+    /// Sources that could not be queried; the list is incomplete when this is not empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     /// Explains an empty list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -286,8 +289,11 @@ pub struct Sessions {
     events_dir: PathBuf,
     exe: PathBuf,
     records: Mutex<HashMap<String, Arc<Record>>>,
-    claude_cache: tokio::sync::Mutex<Option<(Instant, Arc<Vec<ClaudeAgent>>)>>,
+    claude_cache: tokio::sync::Mutex<Option<(Instant, ClaudeList)>>,
 }
+
+/// `claude agents --json`, or why it is unavailable.
+type ClaudeList = Arc<Result<Vec<ClaudeAgent>, String>>;
 
 /// What a listing is built from.
 struct Context {
@@ -295,6 +301,8 @@ struct Context {
     snapshot: Snapshot,
     claude: Arc<Vec<ClaudeAgent>>,
     now: u64,
+    /// Sources that failed; sessions from them are missing.
+    problems: Vec<String>,
 }
 
 impl Sessions {
@@ -339,7 +347,7 @@ impl Sessions {
         self.config.workspaces.iter().find(|ws| ws.name == name)
     }
 
-    async fn claude_agents(&self) -> Arc<Vec<ClaudeAgent>> {
+    async fn claude_agents(&self) -> ClaudeList {
         let mut cache = self.claude_cache.lock().await;
         if let Some((at, list)) = cache.as_ref()
             && at.elapsed() < CLAUDE_CACHE
@@ -353,16 +361,19 @@ impl Sessions {
             .find(|a| a.kind == AgentKind::Claude && exec::which(&a.command).is_some());
         let list = Arc::new(match agent {
             Some(agent) => external::claude_agents(agent).await,
-            None => Vec::new(),
+            None => Ok(Vec::new()),
         });
         *cache = Some((Instant::now(), list.clone()));
         list
     }
 
     async fn context(&self) -> Context {
+        let mut problems = Vec::new();
         let panes = match &self.tmux {
             Some(tmux) => tmux.list_panes().await.unwrap_or_else(|err| {
-                tracing::warn!("cannot list tmux panes: {err:#}");
+                problems.push(format!(
+                    "tmux could not be queried ({err:#}); tmux sessions are missing from this list."
+                ));
                 Vec::new()
             }),
             None => Vec::new(),
@@ -371,12 +382,21 @@ impl Sessions {
         let snapshot = tokio::task::spawn_blocking(move || Snapshot::take(with_environ))
             .await
             .unwrap_or_default();
-        let claude = self.claude_agents().await;
+        let claude = match self.claude_agents().await.as_ref() {
+            Ok(list) => Arc::new(list.clone()),
+            Err(err) => {
+                problems.push(format!(
+                    "`claude agents --json` failed ({err}); Claude Code sessions outside tmux are missing and Claude states are estimated from terminal activity."
+                ));
+                Arc::new(Vec::new())
+            }
+        };
         Context {
             panes,
             snapshot,
             claude,
             now: unix_now(),
+            problems,
         }
     }
 
@@ -396,15 +416,15 @@ impl Sessions {
     }
 
     /// All sessions in workspaces with the `sessions` capability, optionally only those whose
-    /// working directory is under `under`.
-    pub async fn list(&self, under: Option<&Path>) -> Vec<Session> {
+    /// working directory is under `under`, and the sources that could not be queried.
+    pub async fn list(&self, under: Option<&Path>) -> (Vec<Session>, Vec<String>) {
         self.cleanup();
         let context = self.context().await;
         let mut sessions = self.collect(&context);
         if let Some(under) = under {
             sessions.retain(|s| Path::new(&s.cwd).starts_with(under));
         }
-        sessions
+        (sessions, context.problems)
     }
 
     fn collect(&self, ctx: &Context) -> Vec<Session> {
@@ -675,7 +695,7 @@ impl Sessions {
                 .zip(claude_dir.as_deref())
                 .and_then(|(pid, dir)| external::claude_inbox(dir, pid));
             if !experimental {
-                session.note = Some("Runs outside tmux, so the bridge can only watch it. Enable [experimental] external_sessions to message it, or start a new session through the bridge.".into());
+                session.note = Some("Runs outside tmux, so the bridge can only watch it. Messaging it needs `[experimental] external_sessions` in the bridge config, which only the machine's owner can enable. Alternatively start a new session through the bridge, if this workspace allows `start`.".into());
             } else {
                 session.controllable = ws.allows(Capability::Input) && inbox.is_some();
                 if let Some((text, at)) = claude_dir
@@ -750,10 +770,16 @@ impl Sessions {
     }
 
     async fn find(&self, id: &str) -> Result<Session, ApiError> {
-        self.list(None).await.into_iter().find(|s| s.id == id).ok_or_else(|| {
-            ApiError::not_found(format!(
+        let (sessions, problems) = self.list(None).await;
+        sessions.into_iter().find(|s| s.id == id).ok_or_else(|| {
+            let mut message = format!(
                 "No session `{id}` in the workspaces you may see. List sessions with GET /v1/sessions."
-            ))
+            );
+            if !problems.is_empty() {
+                message.push_str(" The lookup was incomplete: ");
+                message.push_str(&problems.join(" "));
+            }
+            ApiError::not_found(message)
         })
     }
 
@@ -765,13 +791,22 @@ impl Sessions {
         lines: Option<usize>,
         wait: Option<u64>,
     ) -> Result<Session, ApiError> {
-        let deadline = Instant::now() + Duration::from_secs(wait.unwrap_or(0).min(MAX_WAIT_SECS));
+        let wait = wait.unwrap_or(0).min(MAX_WAIT_SECS);
+        let deadline = Instant::now() + Duration::from_secs(wait);
         loop {
-            let session = self.find(id).await?;
+            let mut session = self.find(id).await?;
             if session.state != SessionState::Working || Instant::now() >= deadline {
-                return Ok(self
-                    .with_screen(session, lines.unwrap_or(DEFAULT_LINES).clamp(1, MAX_LINES))
-                    .await);
+                if session.state == SessionState::Working && wait > 0 {
+                    let still = format!(
+                        "Still working after waiting {wait} s (at most {MAX_WAIT_SECS} s per call). Call again with `wait` to keep waiting; the agent does not need another message."
+                    );
+                    session.note = Some(match session.note.take() {
+                        Some(note) => format!("{still} {note}"),
+                        None => still,
+                    });
+                }
+                let lines = lines.unwrap_or(DEFAULT_LINES).clamp(1, MAX_LINES);
+                return Ok(self.with_screen(session, lines).await);
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -876,19 +911,21 @@ impl Sessions {
         }
         if let Some(resume) = &request.resume
             && agent.kind == AgentKind::Claude
-            && let Some(open) = self
-                .claude_agents()
-                .await
-                .iter()
-                .find(|c| c.session_id.as_deref() == Some(resume) && c.pid.is_some())
         {
-            return Err(ApiError::conflict(
-                "session_open",
-                format!(
-                    "Claude session `{resume}` is open in another process (pid {}). Send it input instead of resuming it twice.",
-                    open.pid.unwrap_or_default()
-                ),
-            ));
+            let claude = self.claude_agents().await;
+            let open = claude.as_ref().as_ref().ok().and_then(|list| {
+                list.iter()
+                    .find(|c| c.session_id.as_deref() == Some(resume.as_str()) && c.pid.is_some())
+                    .and_then(|c| c.pid)
+            });
+            if let Some(pid) = open {
+                return Err(ApiError::conflict(
+                    "session_open",
+                    format!(
+                        "Claude session `{resume}` is open in another process (pid {pid}). Send input to that session instead of resuming it twice."
+                    ),
+                ));
+            }
         }
 
         let id = new_session_name(&resolved.path, &agent.name);
@@ -990,7 +1027,7 @@ impl Sessions {
                 StatusCode::BAD_GATEWAY,
                 "agent_exited",
                 format!(
-                    "`{}` exited right after starting in {}. Run it there in a terminal to see why (e.g. it is not logged in, or the agent's `args` contain an unsupported flag).",
+                    "`{}` exited right after starting in {}. Common causes: the agent is not logged in on this machine, or its configured `args` contain an unsupported flag. Retrying will fail the same way; the machine's owner can run it there in a terminal to see the error. Another agent from GET /v1/info may work.",
                     record.agent.command,
                     record.cwd.display()
                 ),
@@ -1357,7 +1394,7 @@ pub fn new_session_name(cwd: &Path, agent: &str) -> String {
 pub fn resolve_program(program: &str, agent: &Agent) -> Result<String, ApiError> {
     exec::which(program).map(|p| p.display().to_string()).ok_or_else(|| {
         ApiError::unavailable(format!(
-            "`{program}` (agent `{}`) was not found on the bridge's PATH. Install it, or set an absolute `command` in [agents.{}].",
+            "`{program}` (agent `{}`) is not installed on this machine's PATH, so it cannot be started; retrying will not help. Only the machine's owner can install it or set an absolute `command` in [agents.{}]. GET /v1/info shows which agents are available.",
             agent.name, agent.name
         ))
     })

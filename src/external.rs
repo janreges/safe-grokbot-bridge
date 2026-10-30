@@ -50,25 +50,18 @@ pub struct ClaudeAgent {
 }
 
 /// Running Claude Code sessions on this machine (interactive and background).
-pub async fn claude_agents(agent: &Agent) -> Vec<ClaudeAgent> {
+pub async fn claude_agents(agent: &Agent) -> Result<Vec<ClaudeAgent>, String> {
     let mut cmd = Command::new(&agent.command);
     scrub_env(&mut cmd);
     cmd.envs(agent.env.iter().map(|(k, v)| (k, v)))
         .args(["agents", "--json"]);
-    match exec::run(cmd, None, Duration::from_secs(10), 4 * 1024 * 1024).await {
-        Ok(out) if out.success() => serde_json::from_str(&out.stdout).unwrap_or_else(|err| {
-            tracing::debug!("cannot parse `claude agents --json`: {err}");
-            Vec::new()
-        }),
-        Ok(out) => {
-            tracing::debug!("`claude agents --json` failed: {}", out.stderr.trim());
-            Vec::new()
-        }
-        Err(err) => {
-            tracing::debug!("cannot run `claude agents --json`: {err:#}");
-            Vec::new()
-        }
+    let out = exec::run(cmd, None, Duration::from_secs(10), 4 * 1024 * 1024)
+        .await
+        .map_err(|err| format!("{err:#}"))?;
+    if !out.success() {
+        return Err(out.stderr.trim().to_string());
     }
+    serde_json::from_str(&out.stdout).map_err(|err| format!("unexpected output: {err}"))
 }
 
 /// Claude Code's config directory (`CLAUDE_CONFIG_DIR`, default `~/.claude`).

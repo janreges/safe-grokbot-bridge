@@ -514,12 +514,21 @@ async fn list_sessions(
         Some(path) => Some(paths::resolve(&app.config, path)?.path),
         None => None,
     };
-    let sessions = app.sessions.list(under.as_deref()).await;
-    let note = sessions.is_empty().then(|| {
-        "No agent sessions run in the workspaces you may see. Start one with POST /v1/sessions."
-            .to_string()
-    });
-    Ok(Json(SessionList { sessions, note }))
+    let (sessions, warnings) = app.sessions.list(under.as_deref()).await;
+    let note = match (sessions.is_empty(), warnings.is_empty()) {
+        (true, true) => Some(
+            "No agent sessions run in the workspaces you may see. Start one with POST /v1/sessions if a workspace allows `start`.".to_string(),
+        ),
+        (true, false) => Some(
+            "No sessions found, but the list is incomplete: some sources failed (see `warnings`). Do not conclude that nothing runs.".to_string(),
+        ),
+        _ => None,
+    };
+    Ok(Json(SessionList {
+        sessions,
+        warnings,
+        note,
+    }))
 }
 
 /// Starts an agent session in a folder. With `runner: "tmux"` the agent runs in a live terminal

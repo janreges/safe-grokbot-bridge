@@ -26,7 +26,14 @@ pub struct FileList {
     pub entries: Vec<FileEntry>,
     /// `true` when `limit` cut the listing short.
     pub truncated: bool,
-    /// Explains an empty or truncated listing.
+    /// Levels descended (the requested `depth`, capped at 5).
+    pub depth: usize,
+    /// Maximum entries returned (the requested `limit`, capped at 2000).
+    pub limit: usize,
+    /// Entries that could not be read (e.g. permission denied); the listing is incomplete when
+    /// this is above 0.
+    pub unreadable: usize,
+    /// Explains an empty, truncated or incomplete listing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
@@ -111,7 +118,12 @@ pub fn list(ws: &Workspace, dir: &Path, depth: usize, limit: usize) -> Result<Fi
 
     let mut entries = Vec::new();
     let mut truncated = false;
-    for entry in walker.flatten() {
+    let mut unreadable = 0;
+    for entry in walker {
+        let Ok(entry) = entry else {
+            unreadable += 1;
+            continue;
+        };
         if entry.depth() == 0 {
             continue;
         }
@@ -136,19 +148,28 @@ pub fn list(ws: &Workspace, dir: &Path, depth: usize, limit: usize) -> Result<Fi
             kind,
         });
     }
-    let note = if truncated {
-        Some(format!(
-            "Only the first {limit} entries are shown. List a subdirectory, lower `depth`, or raise `limit` (max {MAX_LIST_LIMIT})."
-        ))
-    } else if entries.is_empty() {
-        Some("The directory is empty, or everything in it is ignored by .gitignore or deny patterns.".into())
-    } else {
-        None
-    };
+    let mut notes = Vec::new();
+    if truncated {
+        notes.push(if limit < MAX_LIST_LIMIT {
+            format!("Only the first {limit} entries are shown; more exist. Raise `limit` (max {MAX_LIST_LIMIT}), lower `depth`, or list a subdirectory.")
+        } else {
+            format!("Only the first {limit} entries are shown; more exist and {MAX_LIST_LIMIT} is the maximum `limit`. Lower `depth` or list subdirectories one by one.")
+        });
+    }
+    if unreadable > 0 {
+        notes.push(format!("{unreadable} entries could not be read (for example permission denied), so the listing is incomplete."));
+    }
+    if entries.is_empty() && unreadable == 0 {
+        notes.push("The directory is empty, or everything in it is ignored by .gitignore or deny patterns.".into());
+    }
+    let note = (!notes.is_empty()).then(|| notes.join(" "));
     Ok(FileList {
         path: dir.display().to_string(),
         entries,
         truncated,
+        depth,
+        limit,
+        unreadable,
         note,
     })
 }
@@ -172,7 +193,7 @@ pub fn read(
     }
     if metadata.len() > MAX_FILE_BYTES {
         return Err(ApiError::too_large(format!(
-            "`{}` has {} bytes; files over {MAX_FILE_BYTES} bytes are not served. Ask an agent session to inspect it instead.",
+            "`{}` has {} bytes; this endpoint serves files up to {MAX_FILE_BYTES} bytes and no parameter changes that. If this workspace allows sessions, an agent session in that folder can inspect the file.",
             path.display(),
             metadata.len()
         )));

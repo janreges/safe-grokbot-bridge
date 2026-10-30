@@ -42,7 +42,7 @@ pub struct GitOutput {
     pub command: String,
     /// Raw git output. `log` lines are `<hash>\t<ISO date>\t<author>\t<subject>`.
     pub output: String,
-    /// `true` when the output was cut at 256 KiB; narrow it with `path`, `rev` or `limit`.
+    /// `true` when the output was cut at 256 KiB; `note` says how to narrow it.
     pub truncated: bool,
     /// Explains empty or truncated output.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,10 +103,13 @@ pub async fn run(dir: &Path, request: GitRequest) -> Result<GitOutput, ApiError>
             None => Ok(vec![]),
         }
     };
-    let empty_note = match &request {
+    let (empty_note, narrow) = match &request {
         GitRequest::Status => {
             args.extend(["status", "--short", "--branch"].map(String::from));
-            ""
+            (
+                "",
+                "This endpoint has no narrowing options; inspect parts of the change with /v1/git/diff and `path`.",
+            )
         }
         GitRequest::Log { limit, rev, path } => {
             args.extend([
@@ -117,7 +120,10 @@ pub async fn run(dir: &Path, request: GitRequest) -> Result<GitOutput, ApiError>
             ]);
             push_rev(&mut tail, rev)?;
             tail.extend(path_filter(path)?);
-            "No commits match."
+            (
+                "No commits match.",
+                "Narrow it with a smaller `limit`, a `rev` range or a `path`.",
+            )
         }
         GitRequest::Diff { rev, staged, path } => {
             args.extend(
@@ -135,7 +141,14 @@ pub async fn run(dir: &Path, request: GitRequest) -> Result<GitOutput, ApiError>
             }
             push_rev(&mut tail, rev)?;
             tail.extend(path_filter(path)?);
-            "No differences."
+            (
+                if *staged || rev.is_some() {
+                    "No differences."
+                } else {
+                    "No unstaged changes (the working tree matches the index). Staged changes are shown with `staged=true`."
+                },
+                "Narrow it with `path`.",
+            )
         }
         GitRequest::Show { rev, path } => {
             args.extend(
@@ -154,7 +167,7 @@ pub async fn run(dir: &Path, request: GitRequest) -> Result<GitOutput, ApiError>
                 &Some(rev.clone().unwrap_or_else(|| "HEAD".into())),
             )?;
             tail.extend(path_filter(path)?);
-            ""
+            ("", "Narrow it with `path`.")
         }
     };
     args.extend(tail);
@@ -186,7 +199,7 @@ pub async fn run(dir: &Path, request: GitRequest) -> Result<GitOutput, ApiError>
         .await
         .map_err(|err| {
             ApiError::unavailable(format!(
-                "Could not run git: {err:#}. Is git installed on the bridge machine?"
+                "Could not run git: {err:#}. This affects every git endpoint on this machine; retrying will not help until git works there."
             ))
         })?;
     if !out.success() {
@@ -201,7 +214,7 @@ pub async fn run(dir: &Path, request: GitRequest) -> Result<GitOutput, ApiError>
         ));
     }
     let note = if out.truncated {
-        Some("Output was cut at 256 KiB. Narrow it with `path`, `rev` or a smaller `limit`.".into())
+        Some(format!("Output was cut at 256 KiB. {narrow}"))
     } else if out.stdout.trim().is_empty() && !empty_note.is_empty() {
         Some(empty_note.to_string())
     } else {

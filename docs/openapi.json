@@ -1057,9 +1057,17 @@
         "required": [
           "path",
           "entries",
-          "truncated"
+          "truncated",
+          "depth",
+          "limit",
+          "unreadable"
         ],
         "properties": {
+          "depth": {
+            "type": "integer",
+            "description": "Levels descended (the requested `depth`, capped at 5).",
+            "minimum": 0
+          },
           "entries": {
             "type": "array",
             "items": {
@@ -1067,12 +1075,17 @@
             },
             "description": "Entries in path order. Files ignored by `.gitignore` and paths matching the workspace's\ndeny patterns are left out."
           },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum entries returned (the requested `limit`, capped at 2000).",
+            "minimum": 0
+          },
           "note": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Explains an empty or truncated listing."
+            "description": "Explains an empty, truncated or incomplete listing."
           },
           "path": {
             "type": "string",
@@ -1081,6 +1094,11 @@
           "truncated": {
             "type": "boolean",
             "description": "`true` when `limit` cut the listing short."
+          },
+          "unreadable": {
+            "type": "integer",
+            "description": "Entries that could not be read (e.g. permission denied); the listing is incomplete when\nthis is above 0.",
+            "minimum": 0
           }
         }
       },
@@ -1115,7 +1133,7 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "`true` when the output was cut at 256 KiB; narrow it with `path`, `rev` or `limit`."
+            "description": "`true` when the output was cut at 256 KiB; `note` says how to narrow it."
           }
         }
       },
@@ -1401,6 +1419,13 @@
             "items": {
               "$ref": "#/components/schemas/Session"
             }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Sources that could not be queried; the list is incomplete when this is not empty."
           }
         }
       },
