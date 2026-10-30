@@ -810,6 +810,11 @@ impl Sessions {
                     .find(|c| c.pid.is_some_and(|pid| tree.contains(&pid)))
             })
             .flatten();
+        // Profiles of one agent share its program; the registry entry knows which one runs here.
+        let agent = match (record, claude) {
+            (None, Some(entry)) => self.config.agent(&entry.agent).cloned().unwrap_or(agent),
+            _ => agent,
+        };
         let codex = (agent.kind == AgentKind::Codex)
             .then(|| ctx.codex.iter().find(|t| tree.contains(&t.pid)))
             .flatten();
