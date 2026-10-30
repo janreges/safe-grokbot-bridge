@@ -191,8 +191,8 @@ launchctl load ~/Library/LaunchAgents/com.github.janreges.safe-grokbot-bridge.pl
 - **WSL 2:** the services run while the distribution runs. Windows does not start it at boot,
   and systemd services do not keep it running. Start it when you log on to Windows with a Task
   Scheduler task (trigger *At log on*, action `wsl.exe` with the arguments
-  `-d <distribution> --exec sleep infinity`), and leave that task running. The bridge is then
-  reachable while you are logged on to Windows.
+  `-d <distribution> --exec sleep infinity`, and *Stop the task if it runs longer than* cleared),
+  and leave that task running. The bridge is then reachable while you are logged on to Windows.
 - **macOS:** a launchd agent runs while you are logged in. To have the bridge back after a
   restart without logging in, turn on automatic login (not available with FileVault). Agents
   need your user session, Claude Code for example keeps its login in your keychain, so the
@@ -202,7 +202,8 @@ launchctl load ~/Library/LaunchAgents/com.github.janreges.safe-grokbot-bridge.pl
 ### Windows
 
 - Run `safe-grokbot-bridge.exe serve` from Task Scheduler ("At log on", "Run only when user is
-  logged on"), so it runs as you and sees your agent logins.
+  logged on"), so it runs as you and sees your agent logins. On the task's *Settings* tab, clear
+  *Stop the task if it runs longer than*: its default of 3 days would stop the bridge.
 - Without a tmux-compatible multiplexer, sessions run **headless**. Install
   [psmux](https://github.com/psmux/psmux) (`winget install psmux`) and set
   `[sessions] tmux = "psmux"` for tmux sessions; this is best effort.

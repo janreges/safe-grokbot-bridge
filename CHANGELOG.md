@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- The Windows instructions say to clear Task Scheduler's *Stop the task if it runs longer than*,
+  whose default of 3 days would stop the bridge.
+
 ## [0.1.1] - 2026-10-30
 
 ### Security
