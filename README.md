@@ -59,8 +59,9 @@ cargo install --git https://github.com/janreges/safe-grokbot-bridge
 # 2. Create a config with a fresh token (printed once) and your projects folder as a workspace
 safe-grokbot-bridge init --workspace ~/projects
 
-# 3. Allow driving agents there: add "input" and "start" to `allow`, then review everything
-$EDITOR ~/.config/safe-grokbot-bridge/config.toml
+# 3. Allow driving agents there: add "input" and "start" to `allow` in the file `init` wrote
+#    (Linux: ~/.config/safe-grokbot-bridge/config.toml,
+#     macOS: ~/Library/Application Support/safe-grokbot-bridge/config.toml), then review everything
 safe-grokbot-bridge check
 
 # 4. Run it, and publish it with a Cloudflare Tunnel (see docs/deployment.md)

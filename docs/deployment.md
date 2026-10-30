@@ -122,7 +122,10 @@ Without systemd, run `safe-grokbot-bridge serve` in a tmux window of its own.
 
 ### macOS: launchd
 
-`~/Library/LaunchAgents/com.github.janreges.safe-grokbot-bridge.plist`:
+`~/Library/LaunchAgents/com.github.janreges.safe-grokbot-bridge.plist`. launchd does not expand
+`~`, so replace `/Users/me` with your home folder, and the program path with the output of
+`which safe-grokbot-bridge` (`cargo install` puts it in `~/.cargo/bin`). `PATH` must include the
+folders of your agents (`which claude codex`).
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -131,9 +134,9 @@ Without systemd, run `safe-grokbot-bridge serve` in a tmux window of its own.
 <dict>
   <key>Label</key><string>com.github.janreges.safe-grokbot-bridge</string>
   <key>ProgramArguments</key>
-  <array><string>/usr/local/bin/safe-grokbot-bridge</string><string>serve</string></array>
+  <array><string>/Users/me/.cargo/bin/safe-grokbot-bridge</string><string>serve</string></array>
   <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+  <dict><key>PATH</key><string>/Users/me/.local/bin:/Users/me/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardErrorPath</key><string>/tmp/safe-grokbot-bridge.log</string>
