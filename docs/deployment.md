@@ -122,6 +122,7 @@ Description=safe-grokbot-bridge
 [Service]
 ExecStart=%h/.cargo/bin/safe-grokbot-bridge serve
 Restart=on-failure
+RestartSec=5
 # Services get a minimal PATH; include where claude, codex, node and git live.
 Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 # Stop only the bridge itself. It stops its own headless turns, while a tmux server it started
@@ -151,6 +152,7 @@ Description=Cloudflare Tunnel for safe-grokbot-bridge
 [Service]
 ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate run --token-file %h/.config/safe-grokbot-bridge/tunnel-token
 Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=default.target
