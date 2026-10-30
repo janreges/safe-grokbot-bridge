@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use tokio::process::Command;
 
-use crate::exec;
+use crate::exec::{self, shell_quote};
 
 const FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{session_name}\t#{session_created}\t#{window_activity}\t#{pane_in_mode}\t#{pane_dead}\t#{pane_current_command}\t#{pane_current_path}";
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -28,7 +28,7 @@ pub const INHERITED_SESSION_VARS: &[&str] = &[
 /// Variables that select an agent's profile. The bridge resolves profiles with its own
 /// environment (to read conversations and check `resume`), so a session takes them from the
 /// bridge, never from the tmux server.
-const PROFILE_VARS: &[&str] = &["CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERMES_HOME"];
+pub const PROFILE_VARS: &[&str] = &["CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERMES_HOME"];
 
 pub fn scrub_env(cmd: &mut Command) {
     for var in INHERITED_SESSION_VARS {
@@ -84,8 +84,13 @@ impl Tmux {
 
     /// Arguments that select the server, for commands shown to people (`tmux -L x attach …`).
     pub fn attach_command(&self, session: &str) -> String {
+        let session = shell_quote(session);
         match &self.socket {
-            Some(socket) => format!("{} -L {socket} attach -t {session}", self.bin),
+            Some(socket) => format!(
+                "{} -L {} attach -t {session}",
+                self.bin,
+                shell_quote(socket)
+            ),
             None => format!("{} attach -t {session}", self.bin),
         }
     }
@@ -139,7 +144,8 @@ impl Tmux {
         env: &[(String, String)],
         argv: &[String],
     ) -> Result<Pane> {
-        let cwd = cwd.display().to_string();
+        // tmux expands formats in the start directory, and `#(…)` there runs a shell command.
+        let cwd = cwd.display().to_string().replace('#', "##");
         let mut args: Vec<String> = [
             "new-session",
             "-d",

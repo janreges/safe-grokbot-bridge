@@ -23,6 +23,22 @@ impl Output {
     }
 }
 
+/// Quotes a value for a shell command line shown to people (POSIX shells and PowerShell read a
+/// single-quoted value literally).
+pub fn shell_quote(value: &str) -> String {
+    let plain = !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-=:@%+,".contains(c));
+    if plain {
+        value.to_string()
+    } else if cfg!(windows) {
+        format!("'{}'", value.replace('\'', "''"))
+    } else {
+        format!("'{}'", value.replace('\'', r"'\''"))
+    }
+}
+
 /// Runs `cmd` to completion. The process is killed when the timeout expires.
 pub async fn run(
     mut cmd: Command,

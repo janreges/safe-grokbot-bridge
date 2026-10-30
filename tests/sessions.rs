@@ -454,6 +454,26 @@ async fn tmux_sessions_take_text_and_keys_and_ignore_other_panes() {
         "{body}"
     );
 
+    // tmux reads the start directory as a format; a folder name must stay literal.
+    let odd = h.root.join("c#{session_name}");
+    std::fs::create_dir(&odd).unwrap();
+    let (status, third) = h
+        .post("/v1/sessions", json!({"cwd": odd, "agent": "echo"}))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{third}");
+    let third = third["id"].as_str().unwrap().to_string();
+    let out = tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        &format!("={third}:"),
+        "#{pane_current_path}",
+    ]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        odd.display().to_string()
+    );
+
     let _ = tmux(&["kill-server"]);
     // SAFETY: getuid has no preconditions.
     let uid = unsafe { libc::getuid() };
