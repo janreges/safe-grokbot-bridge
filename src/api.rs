@@ -194,15 +194,36 @@ fn add_common_responses(openapi: &mut utoipa::openapi::OpenApi) {
 
 pub fn router(app: AppState) -> Router {
     let (routes, _) = api_routes().split_for_parts();
-    let protected = routes.layer(middleware::from_fn_with_state(
-        app.clone(),
-        auth::middleware,
-    ));
+    let protected = routes
+        .fallback(unknown_route)
+        .method_not_allowed_fallback(wrong_method)
+        .layer(middleware::from_fn_with_state(
+            app.clone(),
+            auth::middleware,
+        ));
     Router::new()
         .route("/healthz", get(healthz))
         .merge(protected)
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(app)
+}
+
+async fn unknown_route(uri: axum::http::Uri) -> ApiError {
+    ApiError::not_found(format!(
+        "There is no endpoint `{}`. GET /openapi.json lists the endpoints.",
+        uri.path().chars().take(200).collect::<String>()
+    ))
+}
+
+async fn wrong_method(method: axum::http::Method, uri: axum::http::Uri) -> ApiError {
+    ApiError::new(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method_not_allowed",
+        format!(
+            "`{}` does not support {method}. GET /openapi.json lists the methods of every endpoint.",
+            uri.path().chars().take(200).collect::<String>()
+        ),
+    )
 }
 
 /// Turns a JSON body parse failure into the API's JSON error format.
@@ -246,10 +267,14 @@ static BLOCKING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
-    let _permit = BLOCKING.acquire().await.map_err(ApiError::internal)?;
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(ApiError::internal)?
+    let permit = BLOCKING.acquire().await.map_err(ApiError::internal)?;
+    // The permit goes with the work: a cancelled request does not stop a started read.
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(ApiError::internal)?
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -331,7 +356,7 @@ pub struct LimitsInfo {
 /// Describes this machine: version, agents, the workspaces you may access and the limits.
 /// Call this first.
 #[utoipa::path(get, path = "/v1/info", tag = "info", responses(
-    (status = 200, body = Info),
+    (status = 200, description = "This machine, its agents and the workspaces you may access", body = Info),
     (status = 401, description = "Missing or invalid token", body = ErrorBody),
 ))]
 async fn info(State(app): State<AppState>) -> Json<Info> {
@@ -397,7 +422,7 @@ pub struct ListFilesQuery {
 /// Lists a directory in path order, page by page. Entries ignored by `.gitignore` or matching
 /// the workspace's deny patterns (secrets such as `.env` files and keys) are left out.
 #[utoipa::path(get, path = "/v1/files", tag = "files", params(ListFilesQuery), responses(
-    (status = 200, body = FileList),
+    (status = 200, description = "The directory listing", body = FileList),
     (status = 400, description = "Not an absolute directory path", body = ErrorBody),
     (status = 403, description = "Outside the workspaces, denied, or `files` not allowed", body = ErrorBody),
     (status = 404, description = "The directory does not exist", body = ErrorBody),
@@ -438,7 +463,7 @@ pub struct ReadFileQuery {
 /// Reads a range of lines from a text file. When `truncated` is true, continue with
 /// `start_line = next_start_line`.
 #[utoipa::path(get, path = "/v1/files/content", tag = "files", params(ReadFileQuery), responses(
-    (status = 200, body = FileContent),
+    (status = 200, description = "The requested lines of the file", body = FileContent),
     (status = 400, description = "Not a file, or `start_line` past the end", body = ErrorBody),
     (status = 403, description = "Outside the workspaces, denied, or `files` not allowed", body = ErrorBody),
     (status = 404, description = "The file does not exist", body = ErrorBody),
@@ -537,9 +562,11 @@ async fn git_in(
 
 /// `git status --short --branch`: the current branch and changed files.
 #[utoipa::path(get, path = "/v1/git/status", tag = "git", params(GitStatusQuery), responses(
-    (status = 200, body = GitOutput),
+    (status = 200, description = "The git output", body = GitOutput),
     (status = 400, description = "Not a git repository or invalid parameters", body = ErrorBody),
     (status = 403, description = "Outside the workspaces or `git` not allowed", body = ErrorBody),
+    (status = 404, description = "The directory does not exist", body = ErrorBody),
+    (status = 503, description = "git cannot be run on this machine", body = ErrorBody),
 ))]
 async fn git_status(
     State(app): State<AppState>,
@@ -551,9 +578,11 @@ async fn git_status(
 
 /// Commit history, one commit per line: `<hash>\t<ISO date>\t<author>\t<subject>`.
 #[utoipa::path(get, path = "/v1/git/log", tag = "git", params(GitLogQuery), responses(
-    (status = 200, body = GitOutput),
+    (status = 200, description = "The git output", body = GitOutput),
     (status = 400, description = "Not a git repository or invalid parameters", body = ErrorBody),
     (status = 403, description = "Outside the workspaces or `git` not allowed", body = ErrorBody),
+    (status = 404, description = "The directory does not exist", body = ErrorBody),
+    (status = 503, description = "git cannot be run on this machine", body = ErrorBody),
 ))]
 async fn git_log(
     State(app): State<AppState>,
@@ -570,9 +599,11 @@ async fn git_log(
 
 /// A diff with a summary (`--stat`) followed by the patch.
 #[utoipa::path(get, path = "/v1/git/diff", tag = "git", params(GitDiffQuery), responses(
-    (status = 200, body = GitOutput),
+    (status = 200, description = "The git output", body = GitOutput),
     (status = 400, description = "Not a git repository or invalid parameters", body = ErrorBody),
     (status = 403, description = "Outside the workspaces or `git` not allowed", body = ErrorBody),
+    (status = 404, description = "The directory does not exist", body = ErrorBody),
+    (status = 503, description = "git cannot be run on this machine", body = ErrorBody),
 ))]
 async fn git_diff(
     State(app): State<AppState>,
@@ -589,9 +620,11 @@ async fn git_diff(
 
 /// One commit: metadata, summary and patch.
 #[utoipa::path(get, path = "/v1/git/show", tag = "git", params(GitShowQuery), responses(
-    (status = 200, body = GitOutput),
+    (status = 200, description = "The git output", body = GitOutput),
     (status = 400, description = "Not a git repository or invalid parameters", body = ErrorBody),
     (status = 403, description = "Outside the workspaces or `git` not allowed", body = ErrorBody),
+    (status = 404, description = "The directory does not exist", body = ErrorBody),
+    (status = 503, description = "git cannot be run on this machine", body = ErrorBody),
 ))]
 async fn git_show(
     State(app): State<AppState>,
@@ -624,7 +657,7 @@ pub struct ListSessionsQuery {
 /// started), headless sessions started through the bridge, and Claude Code / Codex sessions
 /// running outside tmux. Check here before starting a new session in a folder.
 #[utoipa::path(get, path = "/v1/sessions", tag = "sessions", params(ListSessionsQuery), responses(
-    (status = 200, body = SessionList),
+    (status = 200, description = "The sessions you may see", body = SessionList),
     (status = 403, description = "`path` is outside the workspaces", body = ErrorBody),
 ))]
 async fn list_sessions(
@@ -639,7 +672,7 @@ async fn list_sessions(
     let (sessions, warnings) = app.sessions.list(under.as_deref()).await;
     let note = match (sessions.is_empty(), warnings.is_empty()) {
         (true, true) => Some(
-            "No agent sessions run in the workspaces you may see. Start one with POST /v1/sessions if a workspace allows `start`.".to_string(),
+            "No agent sessions were found in the workspaces you may see. The bridge finds agents running in tmux, Claude Code outside tmux and, when the owner enabled experimental external sessions, Codex outside tmux; other sessions (Hermes outside tmux, for example) are not visible to it. Start one with POST /v1/sessions if a workspace allows `start`.".to_string(),
         ),
         (true, false) => Some(
             "No sessions found, but the list is incomplete: some sources failed (see `warnings`). Do not conclude that nothing runs.".to_string(),
@@ -691,7 +724,7 @@ pub struct GetSessionQuery {
 #[utoipa::path(get, path = "/v1/sessions/{id}", tag = "sessions",
     params(("id" = String, Path, description = "Session id from the session list"), GetSessionQuery),
     responses(
-        (status = 200, body = Session),
+        (status = 200, description = "The session", body = Session),
         (status = 400, description = "Invalid session id or query", body = ErrorBody),
         (status = 404, description = "No such session", body = ErrorBody),
     ))]
@@ -743,6 +776,7 @@ async fn send_input(
         (status = 403, description = "`input` not allowed in this folder", body = ErrorBody),
         (status = 404, description = "No such session", body = ErrorBody),
         (status = 409, description = "Not started by the bridge", body = ErrorBody),
+        (status = 502, description = "The tmux session could not be stopped", body = ErrorBody),
     ))]
 async fn stop_session(
     State(app): State<AppState>,

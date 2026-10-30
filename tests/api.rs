@@ -34,10 +34,20 @@ async fn healthz_is_public_and_everything_else_needs_a_token() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["workspaces"][0]["path"], h.root.display().to_string());
     assert_eq!(h.get("/openapi.json").await.0, StatusCode::OK);
-    // Errors keep the JSON shape even when the URL itself cannot be decoded.
+    // Errors keep the JSON shape even when the URL itself cannot be decoded, the endpoint does
+    // not exist or does not take the method.
     let (status, body) = h.get("/v1/sessions/%FF").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "invalid_request", "{body}");
+    let (status, body) = h.get("/v1/nope").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found", "{body}");
+    let (status, body) = h.delete("/v1/info").await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(body["error"]["code"], "method_not_allowed", "{body}");
+    // Unknown endpoints need a token like everything else.
+    let (status, _) = h.request("GET", "/v1/nope", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -83,6 +93,21 @@ async fn capabilities_are_enforced() {
             .unwrap()
             .contains("does not allow `files`")
     );
+}
+
+#[test]
+fn every_openapi_response_is_described() {
+    let doc: Value = serde_json::from_str(&api::openapi().to_json().unwrap()).unwrap();
+    for (path, item) in doc["paths"].as_object().unwrap() {
+        for (method, operation) in item.as_object().unwrap() {
+            for (status, response) in operation["responses"].as_object().unwrap() {
+                let described = response["description"]
+                    .as_str()
+                    .is_some_and(|d| !d.is_empty());
+                assert!(described, "{method} {path} {status} has no description");
+            }
+        }
+    }
 }
 
 #[test]

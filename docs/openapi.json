@@ -131,6 +131,7 @@
         ],
         "responses": {
           "200": {
+            "description": "The directory listing",
             "content": {
               "application/json": {
                 "schema": {
@@ -250,6 +251,7 @@
         ],
         "responses": {
           "200": {
+            "description": "The requested lines of the file",
             "content": {
               "application/json": {
                 "schema": {
@@ -396,6 +398,7 @@
         ],
         "responses": {
           "200": {
+            "description": "The git output",
             "content": {
               "application/json": {
                 "schema": {
@@ -434,6 +437,16 @@
               }
             }
           },
+          "404": {
+            "description": "The directory does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limit exceeded, or this address is blocked after failed authentications",
             "headers": {
@@ -444,6 +457,16 @@
                 "description": "Seconds to wait before retrying"
               }
             },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "git cannot be run on this machine",
             "content": {
               "application/json": {
                 "schema": {
@@ -503,6 +526,7 @@
         ],
         "responses": {
           "200": {
+            "description": "The git output",
             "content": {
               "application/json": {
                 "schema": {
@@ -541,6 +565,16 @@
               }
             }
           },
+          "404": {
+            "description": "The directory does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limit exceeded, or this address is blocked after failed authentications",
             "headers": {
@@ -551,6 +585,16 @@
                 "description": "Seconds to wait before retrying"
               }
             },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "git cannot be run on this machine",
             "content": {
               "application/json": {
                 "schema": {
@@ -600,6 +644,7 @@
         ],
         "responses": {
           "200": {
+            "description": "The git output",
             "content": {
               "application/json": {
                 "schema": {
@@ -638,6 +683,16 @@
               }
             }
           },
+          "404": {
+            "description": "The directory does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limit exceeded, or this address is blocked after failed authentications",
             "headers": {
@@ -648,6 +703,16 @@
                 "description": "Seconds to wait before retrying"
               }
             },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "git cannot be run on this machine",
             "content": {
               "application/json": {
                 "schema": {
@@ -679,6 +744,7 @@
         ],
         "responses": {
           "200": {
+            "description": "The git output",
             "content": {
               "application/json": {
                 "schema": {
@@ -717,6 +783,16 @@
               }
             }
           },
+          "404": {
+            "description": "The directory does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limit exceeded, or this address is blocked after failed authentications",
             "headers": {
@@ -727,6 +803,16 @@
                 "description": "Seconds to wait before retrying"
               }
             },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "git cannot be run on this machine",
             "content": {
               "application/json": {
                 "schema": {
@@ -747,6 +833,7 @@
         "operationId": "info",
         "responses": {
           "200": {
+            "description": "This machine, its agents and the workspaces you may access",
             "content": {
               "application/json": {
                 "schema": {
@@ -806,6 +893,7 @@
         ],
         "responses": {
           "200": {
+            "description": "The sessions you may see",
             "content": {
               "application/json": {
                 "schema": {
@@ -1033,6 +1121,7 @@
         ],
         "responses": {
           "200": {
+            "description": "The session",
             "content": {
               "application/json": {
                 "schema": {
@@ -1179,6 +1268,16 @@
                 "description": "Seconds to wait before retrying"
               }
             },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The tmux session could not be stopped",
             "content": {
               "application/json": {
                 "schema": {
@@ -1716,7 +1815,7 @@
               "string",
               "null"
             ],
-            "description": "Message to the agent. In tmux it is pasted as one block and submitted with Enter."
+            "description": "Message to the agent, at most 100 000 bytes. In tmux it is pasted as one block and\nsubmitted with Enter."
           }
         },
         "additionalProperties": false
@@ -1977,7 +2076,7 @@
               "string",
               "null"
             ],
-            "description": "First message to the agent."
+            "description": "First message to the agent, at most 100 000 bytes."
           },
           "resume": {
             "type": [

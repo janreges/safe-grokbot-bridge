@@ -168,7 +168,7 @@ pub struct StartRequest {
     /// `tmux` for a live terminal session (a person can attach to it), `headless` for one
     /// non-interactive run per message. Default: the bridge's configured runner.
     pub runner: Option<RunnerChoice>,
-    /// First message to the agent.
+    /// First message to the agent, at most 100 000 bytes.
     pub prompt: Option<String>,
     /// Model, passed with the agent's model flag (e.g. `opus`, `gpt-6.1-sol`). Replaces a model
     /// set in the agent's configured `args`.
@@ -191,7 +191,8 @@ pub struct StartRequest {
 #[derive(Deserialize, ToSchema, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct InputRequest {
-    /// Message to the agent. In tmux it is pasted as one block and submitted with Enter.
+    /// Message to the agent, at most 100 000 bytes. In tmux it is pasted as one block and
+    /// submitted with Enter.
     pub text: Option<String>,
     /// tmux sessions only: keys to press, e.g. `["Down", "Enter"]` or `["1"]` to answer a menu.
     /// Allowed: `Enter`, `Escape`, `Tab`, `BTab`, `Up`, `Down`, `Left`, `Right`, `PageUp`,
