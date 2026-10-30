@@ -1,26 +1,22 @@
-//! The agent skill and the marketplace manifest that publishes it to Claude Code and Codex.
+//! The agent skills, and the marketplace manifest that publishes one of them to Claude Code and
+//! Codex.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Every skill the marketplace lists exists, carries the frontmatter that agents require (a
-/// `name` equal to its folder's, of lowercase letters, digits and hyphens, and a `description`
-/// of at most 1024 characters), and links only to files it brings along, since installers copy
-/// the skill's folder alone.
+/// Every skill in `skills/` carries the frontmatter that agents require (a `name` equal to its
+/// folder's, of lowercase letters, digits and hyphens, and a `description` of at most 1024
+/// characters), and links only to files it brings along, since installers copy the skill's
+/// folder alone. Every skill the marketplace lists is one of them.
 #[test]
-fn marketplace_skills_are_complete() {
+fn skills_are_complete() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let manifest = std::fs::read_to_string(root.join(".claude-plugin/marketplace.json")).unwrap();
-    let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
-    let skills: Vec<&str> = manifest["plugins"]
-        .as_array()
+    let skills: Vec<PathBuf> = std::fs::read_dir(root.join("skills"))
         .unwrap()
-        .iter()
-        .flat_map(|plugin| plugin["skills"].as_array().unwrap())
-        .map(|skill| skill.as_str().unwrap())
+        .map(|entry| entry.unwrap().path())
+        .filter(|dir| dir.join("SKILL.md").is_file())
         .collect();
-    assert!(!skills.is_empty());
-    for skill in skills {
-        let dir = root.join(skill);
+    assert!(skills.len() >= 2, "{skills:?}");
+    for dir in &skills {
         let text = std::fs::read_to_string(dir.join("SKILL.md"))
             .unwrap()
             .replace("\r\n", "\n");
@@ -49,8 +45,25 @@ fn marketplace_skills_are_complete() {
             .filter_map(|rest| rest.split_once(')'))
         {
             if !target.contains("://") && !target.starts_with('#') {
-                assert!(dir.join(target).is_file(), "{skill}: broken link {target}");
+                assert!(dir.join(target).is_file(), "{name}: broken link {target}");
             }
         }
+    }
+
+    let manifest = std::fs::read_to_string(root.join(".claude-plugin/marketplace.json")).unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    for listed in manifest["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|plugin| plugin["skills"].as_array().unwrap())
+    {
+        let listed = dunce::canonicalize(root.join(listed.as_str().unwrap())).unwrap();
+        assert!(
+            skills
+                .iter()
+                .any(|dir| dunce::canonicalize(dir).unwrap() == listed),
+            "{listed:?}"
+        );
     }
 }

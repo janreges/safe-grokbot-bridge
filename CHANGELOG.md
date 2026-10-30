@@ -6,6 +6,13 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- A skill for Grok Bot and other clients, `safe-grokbot-bridge-client`. Besides using the API,
+  it connects a new machine: it creates the Cloudflare Tunnel and writes a short setup message
+  for the coding agent on the machine. It finds machines by their secrets, so it needs no
+  editing, and Grok Bot can install it from its URL.
+
 ### Changed
 
 - The README, the guides, the security policy and the agent skill say plainly that the bridge is

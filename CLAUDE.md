@@ -92,6 +92,7 @@ A test fails when `docs/openapi.json` is out of date, so regenerate it after any
 | `src/procs.rs`, `src/exec.rs` | Process inspection and subprocess helpers |
 | `tests/` | Integration tests using fake agents |
 | `skills/safe-grokbot-bridge/` | Agent skill for setting up the bridge; `.claude-plugin/marketplace.json` publishes it to Claude Code and Codex |
+| `skills/safe-grokbot-bridge-client/` | Skill for Grok Bot and other clients: using the API and connecting new machines |
 
 ## Testing
 
