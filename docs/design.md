@@ -465,14 +465,15 @@ Sessions running outside tmux, for example in a plain terminal tab or an IDE.
   - Codex: live Codex TUIs found by process scan are matched to their thread through the rollout
     files of their `CODEX_HOME`. On Linux the match is exact: the native Codex binary keeps the
     rollouts of its thread and its subagents open, and the newest terminal thread among them
-    (`source: "cli"`) is the session's. Elsewhere it is the thread named by `codex resume <id>`,
-    or else a guess: the newest terminal thread (not a `codex exec` run or a subagent's thread)
-    in the same folder that started after the process. A thread held in another folder never
-    counts, and a TUI that has not started a thread yet is not listed. When a guess could be
-    wrong (several Codex sessions or several recent conversations in the folder), the session is
-    listed as `codex-pid-<pid>` without state, answers or input. Text is queued with
-    `codex queue --thread <id> --message <text>`, and Codex delivers it when the thread is idle.
-    The last answer is read from the rollout file.
+    (`source: "cli"`) is the session's. Elsewhere, and for a TUI attached to a separate
+    `codex app-server` daemon (which keeps the rollouts open itself), it is the thread named by
+    `codex resume <id>`, or else a guess: the newest terminal thread (not a `codex exec` run or
+    a subagent's thread) in the same folder that started after the process. A thread held in
+    another folder never counts, and a TUI that has not started a thread yet is not listed. When
+    a guess could be wrong (several Codex sessions or several recent conversations in the
+    folder, and any guess on Linux), the session is listed as `codex-pid-<pid>` without state,
+    answers or input. Text is queued with `codex queue --thread <id> --message <text>`, and
+    Codex delivers it when the thread is idle. The last answer is read from the rollout file.
 
 - **Shell-hosted tmux panes:** an agent started from a shell inside tmux is not typed into
   (§8.1). With `external_sessions` on, such a Claude Code or Codex session takes `text` through

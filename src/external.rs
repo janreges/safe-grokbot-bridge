@@ -342,7 +342,7 @@ pub fn codex_threads(snapshot: &Snapshot, codex_command: &str) -> Vec<CodexThrea
                     home: home.clone(),
                     pid: process.pid,
                     rollout: found.path,
-                    ambiguous: !found.exact && (shared || found.candidates > 1),
+                    ambiguous: !found.exact && (shared || !found.alone),
                 });
             }
         }
@@ -421,16 +421,15 @@ struct Rollout {
     path: PathBuf,
     /// The process itself names the thread: a rollout file it keeps open, or `codex resume`.
     exact: bool,
-    /// Threads that fit when the process does not name one.
-    candidates: usize,
+    /// Not named, but the only thread that fits, where open files cannot tell more.
+    alone: bool,
 }
 
 /// The rollout (thread) a live Codex process works on. Where open files can be read (Linux), it
-/// is the newest terminal thread among the rollouts the process keeps open; a process without
-/// one has not started a thread yet. Elsewhere it is the thread named by `codex resume <id>`, or
-/// a guess: the newest terminal thread (not a `codex exec` run or a subagent's thread) in `cwd`
-/// that started after the process. A thread held in another folder never counts, because its
-/// history belongs to that folder.
+/// is the newest terminal thread among the rollouts the process keeps open. Otherwise it is the
+/// thread named by `codex resume <id>`, or a guess: the newest terminal thread (not a
+/// `codex exec` run or a subagent's thread) in `cwd` that started after the process. A thread
+/// held in another folder never counts, because its history belongs to that folder.
 fn rollout_of(snapshot: &Snapshot, home: &Path, cwd: &Path, process: &ProcInfo) -> Option<Rollout> {
     let usable = |path: PathBuf| {
         let meta = rollout_meta(&path)?;
@@ -439,16 +438,21 @@ fn rollout_of(snapshot: &Snapshot, home: &Path, cwd: &Path, process: &ProcInfo) 
             .unwrap_or(meta.cwd == cwd);
         (meta.interactive && in_cwd).then_some((meta, path))
     };
-    if let Some(open) = open_rollouts(snapshot, process.pid, home) {
-        let (meta, path) = open
-            .into_iter()
-            .filter_map(usable)
-            .max_by_key(|(meta, _)| meta.started)?;
+    // On Linux the open rollout settles it. A TUI attached to a separate app-server daemon keeps
+    // none open itself (the daemon does); it is then matched like elsewhere, but only as a guess.
+    let open = open_rollouts(snapshot, process.pid, home);
+    let named = open
+        .iter()
+        .flatten()
+        .cloned()
+        .filter_map(usable)
+        .max_by_key(|(meta, _)| meta.started);
+    if let Some((meta, path)) = named {
         return Some(Rollout {
             id: meta.id,
             path,
             exact: true,
-            candidates: 1,
+            alone: true,
         });
     }
     let resumed = process
@@ -466,7 +470,7 @@ fn rollout_of(snapshot: &Snapshot, home: &Path, cwd: &Path, process: &ProcInfo) 
             id: meta.id,
             path,
             exact: true,
-            candidates: 1,
+            alone: true,
         });
     }
     let started = std::time::UNIX_EPOCH
@@ -476,13 +480,13 @@ fn rollout_of(snapshot: &Snapshot, home: &Path, cwd: &Path, process: &ProcInfo) 
         .filter_map(usable)
         .filter(|(meta, _)| meta.started.is_some_and(|at| at >= started))
         .collect();
-    let count = candidates.len();
+    let alone = candidates.len() == 1 && open.is_none();
     let (meta, path) = candidates.into_iter().next()?;
     Some(Rollout {
         id: meta.id,
         path,
         exact: false,
-        candidates: count,
+        alone,
     })
 }
 
@@ -808,14 +812,13 @@ mod tests {
         // exercise the matching used outside Linux.
         let none = Snapshot::default();
         let found = |cwd: &Path, process: &ProcInfo| {
-            rollout_of(&none, home.path(), cwd, process)
-                .map(|r| (r.id, r.path, r.exact, r.candidates))
+            rollout_of(&none, home.path(), cwd, process).map(|r| (r.id, r.path, r.exact, r.alone))
         };
         // 2026-10-30T07:59:00Z: the thread started after the process did.
         let fresh = process(1_793_347_140, &["codex"]);
         assert_eq!(
             found(&cwd, &fresh),
-            Some(("t-1".into(), rollout.clone(), false, 1))
+            Some(("t-1".into(), rollout.clone(), false, true))
         );
         // A process started after the thread has not created its own thread yet.
         let later = process(1_793_347_500, &["codex"]);
@@ -824,7 +827,7 @@ mod tests {
         let resumed = process(1_793_347_500, &["codex", "resume", "t-1"]);
         assert_eq!(
             found(&cwd, &resumed),
-            Some(("t-1".into(), rollout.clone(), true, 1))
+            Some(("t-1".into(), rollout.clone(), true, true))
         );
         assert!(found(Path::new("/elsewhere"), &fresh).is_none());
         // A resumed conversation that was held in another folder is not this process's thread.
@@ -840,7 +843,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             found(&cwd, &fresh),
-            Some(("t-1".into(), rollout.clone(), false, 1))
+            Some(("t-1".into(), rollout.clone(), false, true))
         );
         // … but another terminal's newer thread makes the guess ambiguous.
         let other = serde_json::json!({"type":"session_meta","payload":{"id":"t-other","cwd":cwd,"timestamp":"2026-10-30T08:06:00.000Z","source":"cli"}});
@@ -849,7 +852,7 @@ mod tests {
             other.to_string(),
         )
         .unwrap();
-        assert_eq!(found(&cwd, &fresh).map(|f| f.3), Some(2));
+        assert_eq!(found(&cwd, &fresh).map(|f| f.3), Some(false));
         assert_eq!(codex_thread_cwd(home.path(), "t-1"), Some(cwd.clone()));
         assert_eq!(codex_thread_cwd(home.path(), "t-2"), None);
         let progress = codex_progress(&rollout).unwrap();
