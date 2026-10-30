@@ -5,17 +5,18 @@
 
 use std::sync::Arc;
 
-use axum::extract::rejection::QueryRejection;
-use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::http::StatusCode;
 use axum::routing::get;
-use axum::{Json, Router, middleware};
+use axum::{Extension, Json, Router, middleware};
 use serde::{Deserialize, Serialize};
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::auth;
+use crate::auth::{self, Caller};
 use crate::config::{AgentKind, Capability};
 use crate::error::{ApiError, ErrorBody};
 use crate::exec;
@@ -23,9 +24,8 @@ use crate::files::{self, FileContent, FileList};
 use crate::git::{self, GitOutput, GitRequest};
 use crate::paths;
 use crate::server::AppState;
+use crate::sessions::{InputRequest, MAX_WAIT_SECS, Runner, Session, SessionList, StartRequest};
 
-/// Longest a client may long-poll; stays below Cloudflare's 125 s proxy read timeout.
-pub const MAX_WAIT_SECS: u64 = 90;
 const MAX_BODY: usize = 1024 * 1024;
 
 const API_DESCRIPTION: &str = "\
@@ -52,6 +52,7 @@ the session stops working instead of polling in a tight loop.
         (name = "info", description = "Machine overview"),
         (name = "files", description = "Read-only file access"),
         (name = "git", description = "Read-only git access"),
+        (name = "sessions", description = "Agent sessions: list, start, talk to, stop"),
     )
 )]
 struct ApiDoc;
@@ -83,6 +84,9 @@ fn api_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(git_log))
         .routes(routes!(git_diff))
         .routes(routes!(git_show))
+        .routes(routes!(list_sessions, start_session))
+        .routes(routes!(get_session, stop_session))
+        .routes(routes!(send_input))
 }
 
 /// The OpenAPI document served at `/openapi.json`.
@@ -110,6 +114,13 @@ pub fn router(app: AppState) -> Router {
         .merge(protected)
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(app)
+}
+
+/// Turns a JSON body parse failure into the API's JSON error format.
+fn json<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
+    body.map(|Json(b)| b).map_err(|rejection| {
+        ApiError::bad_request(format!("Invalid JSON body: {}", rejection.body_text()))
+    })
 }
 
 /// Turns a query-string parse failure into the API's JSON error format.
@@ -153,7 +164,20 @@ pub struct Info {
     pub agents: Vec<AgentInfo>,
     /// Folders this bridge exposes. A workspace covers its `path` and everything below it.
     pub workspaces: Vec<WorkspaceInfo>,
+    pub tmux: TmuxInfo,
+    /// Runner used when a start request does not choose one.
+    pub default_runner: Runner,
+    /// Whether sessions running outside tmux can take input (experimental).
+    pub external_sessions: bool,
     pub limits: LimitsInfo,
+}
+
+#[derive(Serialize, ToSchema, Debug)]
+pub struct TmuxInfo {
+    /// Whether tmux sessions can be started and controlled.
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[derive(Serialize, ToSchema, Debug)]
@@ -225,6 +249,12 @@ async fn info(State(app): State<AppState>) -> Json<Info> {
                 allow_bypass_permissions: ws.allow_bypass_permissions,
             })
             .collect(),
+        tmux: TmuxInfo {
+            available: app.sessions.tmux.is_some(),
+            version: app.sessions.tmux_version.clone(),
+        },
+        default_runner: app.sessions.default_runner(),
+        external_sessions: config.experimental.external_sessions,
         limits: LimitsInfo {
             requests_per_minute: config.limits.requests_per_minute,
             max_sessions: config.limits.max_sessions,
@@ -455,4 +485,134 @@ async fn git_show(
         },
     )
     .await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sessions
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListSessionsQuery {
+    /// Only sessions whose working directory is under this absolute path.
+    pub path: Option<String>,
+}
+
+/// Lists agent sessions in the workspaces you may see: tmux sessions (including ones a person
+/// started), headless sessions started through the bridge, and Claude Code / Codex sessions
+/// running outside tmux. Check here before starting a new session in a folder.
+#[utoipa::path(get, path = "/v1/sessions", tag = "sessions", params(ListSessionsQuery), responses(
+    (status = 200, body = SessionList),
+    (status = 403, description = "`path` is outside the workspaces", body = ErrorBody),
+))]
+async fn list_sessions(
+    State(app): State<AppState>,
+    q: Result<Query<ListSessionsQuery>, QueryRejection>,
+) -> Result<Json<SessionList>, ApiError> {
+    let q = query(q)?;
+    let under = match &q.path {
+        Some(path) => Some(paths::resolve(&app.config, path)?.path),
+        None => None,
+    };
+    let sessions = app.sessions.list(under.as_deref()).await;
+    let note = sessions.is_empty().then(|| {
+        "No agent sessions run in the workspaces you may see. Start one with POST /v1/sessions."
+            .to_string()
+    });
+    Ok(Json(SessionList { sessions, note }))
+}
+
+/// Starts an agent session in a folder. With `runner: "tmux"` the agent runs in a live terminal
+/// a person can attach to; with `"headless"` every message is one non-interactive run. The
+/// response comes right after the start: wait for the answer with
+/// `GET /v1/sessions/{id}?wait=60`.
+#[utoipa::path(post, path = "/v1/sessions", tag = "sessions", request_body = StartRequest, responses(
+    (status = 201, description = "Started", body = Session),
+    (status = 400, description = "Invalid request", body = ErrorBody),
+    (status = 403, description = "`start`, the agent or `bypass_permissions` not allowed in this folder", body = ErrorBody),
+    (status = 409, description = "The conversation to resume is open elsewhere", body = ErrorBody),
+    (status = 429, description = "Too many running sessions", body = ErrorBody),
+    (status = 502, description = "The agent exited right after starting", body = ErrorBody),
+    (status = 503, description = "The agent or tmux is not installed", body = ErrorBody),
+))]
+async fn start_session(
+    State(app): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    body: Result<Json<StartRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<Session>), ApiError> {
+    let request = json(body)?;
+    let session = app.sessions.start(request, &caller.token).await?;
+    Ok((StatusCode::CREATED, Json(session)))
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct GetSessionQuery {
+    /// Terminal lines to return in `screen` (1–2000, default 200).
+    pub lines: Option<usize>,
+    /// Wait up to this many seconds (max 90) while the session is `working`; returns as soon
+    /// as it is not.
+    pub wait: Option<u64>,
+}
+
+/// A session with its state, last answer and terminal screen. Use `wait` to long-poll until
+/// the agent stops working.
+#[utoipa::path(get, path = "/v1/sessions/{id}", tag = "sessions",
+    params(("id" = String, Path, description = "Session id from the session list"), GetSessionQuery),
+    responses(
+        (status = 200, body = Session),
+        (status = 404, description = "No such session", body = ErrorBody),
+    ))]
+async fn get_session(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+    q: Result<Query<GetSessionQuery>, QueryRejection>,
+) -> Result<Json<Session>, ApiError> {
+    let q = query(q)?;
+    app.sessions.get(&id, q.lines, q.wait).await.map(Json)
+}
+
+/// Sends a message (`text`) or keystrokes (`keys`) to a session. In tmux, text is pasted as one
+/// block and submitted; keys answer menus and permission prompts. Headless sessions take one
+/// message per turn. Then wait for the answer with `GET /v1/sessions/{id}?wait=60`.
+#[utoipa::path(post, path = "/v1/sessions/{id}/input", tag = "sessions",
+    params(("id" = String, Path, description = "Session id")),
+    request_body = InputRequest,
+    responses(
+        (status = 200, description = "Delivered; the session as it is right after", body = Session),
+        (status = 400, description = "Invalid text or keys", body = ErrorBody),
+        (status = 403, description = "`input` not allowed in this folder", body = ErrorBody),
+        (status = 404, description = "No such session", body = ErrorBody),
+        (status = 409, description = "Busy, ended, or not controllable", body = ErrorBody),
+        (status = 502, description = "Delivery to a session outside tmux failed", body = ErrorBody),
+    ))]
+async fn send_input(
+    State(app): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+    body: Result<Json<InputRequest>, JsonRejection>,
+) -> Result<Json<Session>, ApiError> {
+    let request = json(body)?;
+    app.sessions
+        .input(&id, request, &caller.token)
+        .await
+        .map(Json)
+}
+
+/// Stops a session the bridge started: closes its tmux session or kills its running turn. The
+/// conversation itself stays resumable via `agent_session_id`.
+#[utoipa::path(delete, path = "/v1/sessions/{id}", tag = "sessions",
+    params(("id" = String, Path, description = "Session id")),
+    responses(
+        (status = 200, description = "Stopped; the final state and screen", body = Session),
+        (status = 403, description = "`input` not allowed in this folder", body = ErrorBody),
+        (status = 404, description = "No such session", body = ErrorBody),
+        (status = 409, description = "Not started by the bridge", body = ErrorBody),
+    ))]
+async fn stop_session(
+    State(app): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+) -> Result<Json<Session>, ApiError> {
+    app.sessions.stop(&id, &caller.token).await.map(Json)
 }

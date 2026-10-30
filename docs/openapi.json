@@ -522,6 +522,350 @@
           }
         }
       }
+    },
+    "/v1/sessions": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Lists agent sessions in the workspaces you may see: tmux sessions (including ones a person\nstarted), headless sessions started through the bridge, and Claude Code / Codex sessions\nrunning outside tmux. Check here before starting a new session in a folder.",
+        "operationId": "list_sessions",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Only sessions whose working directory is under this absolute path.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionList"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`path` is outside the workspaces",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Starts an agent session in a folder. With `runner: \"tmux\"` the agent runs in a live terminal\na person can attach to; with `\"headless\"` every message is one non-interactive run. The\nresponse comes right after the start: wait for the answer with\n`GET /v1/sessions/{id}?wait=60`.",
+        "operationId": "start_session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`start`, the agent or `bypass_permissions` not allowed in this folder",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The conversation to resume is open elsewhere",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many running sessions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The agent exited right after starting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The agent or tmux is not installed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{id}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "A session with its state, last answer and terminal screen. Use `wait` to long-poll until\nthe agent stops working.",
+        "operationId": "get_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session id from the session list",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "lines",
+            "in": "query",
+            "description": "Terminal lines to return in `screen` (1–2000, default 200).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "wait",
+            "in": "query",
+            "description": "Wait up to this many seconds (max 90) while the session is `working`; returns as soon\nas it is not.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Stops a session the bridge started: closes its tmux session or kills its running turn. The\nconversation itself stays resumable via `agent_session_id`.",
+        "operationId": "stop_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stopped; the final state and screen",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`input` not allowed in this folder",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not started by the bridge",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{id}/input": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Sends a message (`text`) or keystrokes (`keys`) to a session. In tmux, text is pasted as one\nblock and submitted; keys answer menus and permission prompts. Headless sessions take one\nmessage per turn. Then wait for the answer with `GET /v1/sessions/{id}?wait=60`.",
+        "operationId": "send_input",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InputRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Delivered; the session as it is right after",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid text or keys",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`input` not allowed in this folder",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Busy, ended, or not controllable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Delivery to a session outside tmux failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -571,6 +915,17 @@
           "sessions",
           "input",
           "start"
+        ]
+      },
+      "Effort": {
+        "type": "string",
+        "description": "Reasoning effort, mapped to each agent's own flag.",
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
         ]
       },
       "EntryKind": {
@@ -775,6 +1130,9 @@
           "time",
           "agents",
           "workspaces",
+          "tmux",
+          "default_runner",
+          "external_sessions",
           "limits"
         ],
         "properties": {
@@ -787,6 +1145,14 @@
           },
           "arch": {
             "type": "string"
+          },
+          "default_runner": {
+            "$ref": "#/components/schemas/Runner",
+            "description": "Runner used when a start request does not choose one."
+          },
+          "external_sessions": {
+            "type": "boolean",
+            "description": "Whether sessions running outside tmux can take input (experimental)."
           },
           "limits": {
             "$ref": "#/components/schemas/LimitsInfo"
@@ -803,6 +1169,9 @@
             "type": "string",
             "description": "Current server time, RFC 3339."
           },
+          "tmux": {
+            "$ref": "#/components/schemas/TmuxInfo"
+          },
           "version": {
             "type": "string",
             "description": "Bridge version."
@@ -815,6 +1184,37 @@
             "description": "Folders this bridge exposes. A workspace covers its `path` and everything below it."
           }
         }
+      },
+      "InputRequest": {
+        "type": "object",
+        "description": "Input for a session: text, keys, or both (text first).",
+        "properties": {
+          "keys": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "tmux sessions only: keys to press, e.g. `[\"Down\", \"Enter\"]` or `[\"1\"]` to answer a menu.\nAllowed: `Enter`, `Escape`, `Tab`, `BTab`, `Up`, `Down`, `Left`, `Right`, `PageUp`,\n`PageDown`, `Home`, `End`, `Space`, `BSpace`, `DC`, `C-c`, `C-d`, or one printable\ncharacter."
+          },
+          "submit": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "tmux sessions only: press Enter after pasting `text` (default `true`)."
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Message to the agent. In tmux it is pasted as one block and submitted with Enter."
+          }
+        },
+        "additionalProperties": false
       },
       "LimitsInfo": {
         "type": "object",
@@ -840,6 +1240,269 @@
             "format": "int32",
             "description": "Requests allowed per minute for this token.",
             "minimum": 0
+          }
+        }
+      },
+      "Runner": {
+        "type": "string",
+        "description": "How a session runs.",
+        "enum": [
+          "tmux",
+          "headless",
+          "external"
+        ]
+      },
+      "RunnerChoice": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "tmux",
+          "headless"
+        ]
+      },
+      "Session": {
+        "type": "object",
+        "description": "An agent session.",
+        "required": [
+          "id",
+          "agent",
+          "kind",
+          "runner",
+          "cwd",
+          "workspace",
+          "state",
+          "controllable",
+          "started_by_bridge"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string",
+            "description": "Agent name from the configuration."
+          },
+          "agent_session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent's own id for this conversation (Claude session id, Codex thread id, Hermes\nsession id). Pass it as `resume` to continue the conversation in a new session."
+          },
+          "attach_command": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How a person can open this session in a terminal."
+          },
+          "controllable": {
+            "type": "boolean",
+            "description": "Whether the session accepts input through this bridge."
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Working directory (absolute); usable with the file and git endpoints."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "Session id for the `/v1/sessions/{id}` endpoints."
+          },
+          "keep_alive": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/AgentKind"
+          },
+          "last_activity_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Last terminal output (tmux sessions), RFC 3339."
+          },
+          "last_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent's last completed answer; while a headless turn runs, its latest message."
+          },
+          "last_message_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Hints about this session, e.g. why it cannot take input."
+          },
+          "runner": {
+            "$ref": "#/components/schemas/Runner"
+          },
+          "screen": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The last lines of the terminal (only in `GET /v1/sessions/{id}`)."
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_by_bridge": {
+            "type": "boolean",
+            "description": "Started through this bridge (only those can be stopped with `DELETE`)."
+          },
+          "state": {
+            "$ref": "#/components/schemas/SessionState"
+          },
+          "waiting_for": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the agent waits for when `state` is `waiting`, e.g. `permission prompt`."
+          },
+          "workspace": {
+            "type": "string"
+          }
+        }
+      },
+      "SessionList": {
+        "type": "object",
+        "description": "Sessions in the workspaces this token may see.",
+        "required": [
+          "sessions"
+        ],
+        "properties": {
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Explains an empty list."
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Session"
+            }
+          }
+        }
+      },
+      "SessionState": {
+        "type": "string",
+        "enum": [
+          "working",
+          "waiting",
+          "idle",
+          "finished",
+          "exited",
+          "failed",
+          "unknown"
+        ]
+      },
+      "StartRequest": {
+        "type": "object",
+        "description": "Starts an agent session.",
+        "required": [
+          "cwd",
+          "agent"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string",
+            "description": "Agent name from `GET /v1/info`, allowed in that workspace."
+          },
+          "bypass_permissions": {
+            "type": "boolean",
+            "description": "Run without permission prompts (e.g. `--dangerously-skip-permissions`). Needs\n`allow_bypass_permissions` on the workspace."
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Existing directory (absolute path) inside a workspace with the `start` capability."
+          },
+          "effort": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "keep_alive": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` (default) keeps the session after it answers. `false` closes it once the first\nanswer is in; the answer stays readable in `last_message`."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Model, passed with the agent's model flag (e.g. `opus`, `gpt-6.1-sol`)."
+          },
+          "prompt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "First message to the agent."
+          },
+          "resume": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue an earlier conversation: the agent's session id (`agent_session_id`)."
+          },
+          "runner": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RunnerChoice",
+                "description": "`tmux` for a live terminal session (a person can attach to it), `headless` for one\nnon-interactive run per message. Default: the bridge's configured runner."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "TmuxInfo": {
+        "type": "object",
+        "required": [
+          "available"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "Whether tmux sessions can be started and controlled."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -907,6 +1570,10 @@
     {
       "name": "git",
       "description": "Read-only git access"
+    },
+    {
+      "name": "sessions",
+      "description": "Agent sessions: list, start, talk to, stop"
     }
   ]
 }

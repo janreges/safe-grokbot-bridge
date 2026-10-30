@@ -18,6 +18,7 @@ use tower::ServiceExt;
 use crate::api;
 use crate::auth::Auth;
 use crate::config::Config;
+use crate::sessions::Sessions;
 use crate::tls;
 
 /// Concurrent TLS connections; protects a public listener from connection floods.
@@ -26,17 +27,20 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct App {
-    pub config: Config,
+    pub config: Arc<Config>,
     pub auth: Auth,
+    pub sessions: Arc<Sessions>,
     pub started_at: SystemTime,
 }
 
 pub type AppState = Arc<App>;
 
 impl App {
-    pub fn new(config: Config) -> Result<AppState> {
+    pub async fn new(config: Config) -> Result<AppState> {
+        let config = Arc::new(config);
         Ok(Arc::new(App {
             auth: Auth::new(&config),
+            sessions: Arc::new(Sessions::new(config.clone()).await),
             config,
             started_at: SystemTime::now(),
         }))
@@ -54,7 +58,7 @@ pub async fn run(config: Config) -> Result<()> {
         )?),
         None => None,
     };
-    let app = App::new(config)?;
+    let app = App::new(config).await?;
     let router = api::router(app.clone());
     let listener = TcpListener::bind(listen)
         .await
@@ -84,6 +88,7 @@ pub async fn run(config: Config) -> Result<()> {
             serve_tls(listener, router, tls.config).await;
         }
     }
+    app.sessions.shutdown();
     tracing::info!("stopped");
     Ok(())
 }
