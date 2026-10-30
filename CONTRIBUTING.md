@@ -11,7 +11,7 @@ Thanks for helping. This project values small, clear, well-tested changes over c
 
 ## Development
 
-You need stable Rust (1.88 or newer), git, and tmux for the tmux tests.
+You need stable Rust (1.95 or newer), git, and tmux for the tmux tests.
 
 ```bash
 cargo build
