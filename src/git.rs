@@ -356,9 +356,17 @@ pub async fn repository(dir: &Path) -> Result<Repository, ApiError> {
     let mut pending = vec![common.join("objects")];
     let mut links = Vec::new();
     while let Some(objects) = pending.pop() {
-        // Git skips alternates that do not exist.
-        let Ok(objects) = dunce::canonicalize(&objects) else {
-            continue;
+        let objects = match dunce::canonicalize(&objects) {
+            Ok(objects) => objects,
+            // Git skips alternates that do not exist.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(ApiError::forbidden(format!(
+                    "The repository at {} uses the object store {}, which cannot be checked ({err}), so git access is refused.",
+                    toplevel.display(),
+                    objects.display()
+                )));
+            }
         };
         if storage.contains(&objects) {
             continue;
@@ -372,7 +380,8 @@ pub async fn repository(dir: &Path) -> Result<Repository, ApiError> {
         let alternates = read_alternates(&objects.join("info").join("alternates"), &toplevel)?;
         // Git takes every line as it is: a path, a comment (`#`) or a C-quoted path.
         for line in alternates.lines() {
-            if line.starts_with('"') {
+            // Git reads a path up to a NUL byte; a quoted path needs C unescaping.
+            if line.starts_with('"') || line.contains('\0') {
                 return Err(ApiError::forbidden(format!(
                     "The repository at {} uses a quoted object alternate, which the bridge cannot verify, so git access is refused.",
                     toplevel.display()
@@ -389,9 +398,9 @@ pub async fn repository(dir: &Path) -> Result<Repository, ApiError> {
     Ok(Repository { toplevel, storage })
 }
 
-/// The targets of links in an object store: a loose-object folder, `pack` or a pack file can point
-/// into another repository. (Links to single loose objects are not followed up.) The store must
-/// be readable completely: git can open a known object behind a link the bridge could not see.
+/// The targets of links in an object store: a loose-object folder or object, `pack`, a pack file,
+/// or a file under `info` (commit graphs) can point into another repository. The store must be
+/// readable completely: git can open a known object behind a link the bridge could not see.
 fn linked_storage(objects: &Path, toplevel: &Path) -> Result<Vec<PathBuf>, ApiError> {
     let refuse = |dir: &Path, err: std::io::Error| {
         ApiError::forbidden(format!(
@@ -401,26 +410,42 @@ fn linked_storage(objects: &Path, toplevel: &Path) -> Result<Vec<PathBuf>, ApiEr
         ))
     };
     let mut targets = Vec::new();
-    for dir in [objects.to_path_buf(), objects.join("pack")] {
+    let info = objects.join("info");
+    let mut folders = vec![
+        objects.to_path_buf(),
+        objects.join("pack"),
+        info.join("commit-graphs"),
+        info,
+    ];
+    while let Some(dir) = folders.pop() {
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
-            // A repository without packs has no `pack` folder.
+            // `pack`, `info` and `commit-graphs` are optional.
             Err(err) if err.kind() == std::io::ErrorKind::NotFound && dir != objects => continue,
             Err(err) => return Err(refuse(&dir, err)),
         };
         for entry in entries {
             let entry = entry.map_err(|err| refuse(&dir, err))?;
-            let link = entry
+            let kind = entry
                 .file_type()
-                .map_err(|err| refuse(&entry.path(), err))?
-                .is_symlink();
-            // A link that leads nowhere cannot be read by git either.
-            if link && let Ok(target) = dunce::canonicalize(entry.path()) {
-                targets.push(target);
+                .map_err(|err| refuse(&entry.path(), err))?;
+            if kind.is_symlink() {
+                // A link that leads nowhere cannot be read by git either.
+                if let Ok(target) = dunce::canonicalize(entry.path()) {
+                    targets.push(target);
+                }
+            } else if kind.is_dir() && dir == objects && is_loose_folder(&entry.file_name()) {
+                folders.push(entry.path());
             }
         }
     }
     Ok(targets)
+}
+
+/// `objects/ab`: a folder of loose objects whose names start with `ab`.
+fn is_loose_folder(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    name.len() == 2 && name.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// A repository's list of object alternates, read completely or not at all: an entry the bridge
@@ -711,6 +736,23 @@ mod tests {
             "{:?}",
             repo.storage
         );
+        // So is a single loose object that links into another repository.
+        std::fs::remove_file(&pack).unwrap();
+        std::fs::create_dir(&pack).unwrap();
+        let leaf = borrowed.join(".git/objects/ab/cdef");
+        std::fs::create_dir_all(leaf.parent().unwrap()).unwrap();
+        let foreign = dunce::canonicalize(root.join("partial/.git/HEAD")).unwrap();
+        std::os::unix::fs::symlink(&foreign, &leaf).unwrap();
+        let repo = repository(&borrowed).await.unwrap();
+        assert!(repo.storage.contains(&foreign), "{:?}", repo.storage);
+        std::fs::remove_file(&leaf).unwrap();
+        // An alternate with a NUL byte would be read differently by git.
+        std::fs::write(&alternates, format!("{}\0\n", private.display())).unwrap();
+        assert_eq!(
+            repository(&borrowed).await.err().map(|e| e.code),
+            Some("forbidden")
+        );
+        std::fs::write(&alternates, "").unwrap();
         // An object folder that cannot be listed could hide links, so it is refused.
         use std::os::unix::fs::PermissionsExt;
         let objects = borrowed.join(".git/objects");
