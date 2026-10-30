@@ -124,8 +124,13 @@ bash -c 'umask 077; read -rsp "Tunnel token: " t && echo && [ -n "$t" ] && rm -f
 The command runs in Bash also from zsh, the default shell on macOS. Only you can read the file,
 and nothing is written when the input is empty.
 
-**3b. Let your coding agent do the rest.** Start Claude Code or Codex in your home folder and
-paste this prompt. Replace the host name and fill in the folders you want to expose:
+**3b. Let your coding agent do the rest.** If you installed the
+[agent skill](../README.md#agent-skill), start Claude Code or Codex and say *"Set up
+safe-grokbot-bridge for the Cloudflare Tunnel sgb-pc1 at https://pc1-bridge.example.com."* It
+asks you which folders to expose and what the bot may do there, and continues as below.
+
+Without the skill, start Claude Code or Codex in your home folder and paste this prompt. Replace
+the host name and fill in the folders you want to expose:
 
 ````text
 Set up safe-grokbot-bridge on this machine, so that my Grok Bot can reach it through the

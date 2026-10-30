@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- An agent skill, `safe-grokbot-bridge`, that lets Claude Code, Codex and other coding agents
+  install, configure, upgrade and troubleshoot the bridge. It agrees with the user on the
+  folders to expose and what the bot may do there, before it writes or changes the config. The
+  repository is a plugin marketplace for Claude Code and Codex, and `npx skills add` installs
+  the skill for other agents. Release archives contain it too.
+
 ### Fixed
 
 - The Windows instructions say to clear Task Scheduler's *Stop the task if it runs longer than*,

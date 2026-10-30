@@ -1,0 +1,21 @@
+{
+  "name": "safe-grokbot-bridge",
+  "description": "The agent skill for setting up and running safe-grokbot-bridge.",
+  "owner": {
+    "name": "Ján Regeš",
+    "url": "https://github.com/janreges"
+  },
+  "plugins": [
+    {
+      "name": "safe-grokbot-bridge",
+      "description": "Installs, configures and maintains safe-grokbot-bridge on this machine: a guided choice of the folders a remote bot such as Grok Bot may use, services, Cloudflare Tunnel, upgrades and troubleshooting.",
+      "source": "./",
+      "strict": false,
+      "skills": ["./skills/safe-grokbot-bridge"],
+      "homepage": "https://github.com/janreges/safe-grokbot-bridge",
+      "repository": "https://github.com/janreges/safe-grokbot-bridge",
+      "license": "MIT",
+      "keywords": ["grok", "cloudflare-tunnel", "coding-agents", "tmux", "codex", "remote-access"]
+    }
+  ]
+}

@@ -38,8 +38,8 @@ cargo run -- serve --config dev.toml
   say so when a result is incomplete.
 - **Test what matters.** Security boundaries, parsing of agent output, and end-to-end paths with
   fake agents. No tests for trivial code.
-- **Document user-visible changes** in `CHANGELOG.md` under *Unreleased*, and keep the README and
-  `docs/` in sync.
+- **Document user-visible changes** in `CHANGELOG.md` under *Unreleased*, and keep the README,
+  `docs/` and the agent skill in `skills/` in sync.
 
 ## Commits and pull requests
 

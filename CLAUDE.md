@@ -91,6 +91,7 @@ A test fails when `docs/openapi.json` is out of date, so regenerate it after any
 | `src/hook.rs` | `hook` subcommand: agent turn-complete events |
 | `src/procs.rs`, `src/exec.rs` | Process inspection and subprocess helpers |
 | `tests/` | Integration tests using fake agents |
+| `skills/safe-grokbot-bridge/` | Agent skill for setting up the bridge; `.claude-plugin/marketplace.json` publishes it to Claude Code and Codex |
 
 ## Testing
 
@@ -109,4 +110,5 @@ missing, and Unix-only tests are `#[cfg(unix)]`.
   mood. The repository is public, so every message must make sense to a reader with no other
   context.
 - Record user-visible changes in `CHANGELOG.md` under *Unreleased*.
-- Keep `README.md`, `docs/` and `docs/openapi.json` in sync with the code.
+- Keep `README.md`, `docs/`, `docs/openapi.json` and the agent skill in `skills/` in sync with the
+  code.
