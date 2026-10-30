@@ -1382,6 +1382,13 @@ impl Sessions {
                     .flatten()
             }
             AgentKind::Hermes => match external::hermes_session(agent, id).await {
+                // Hermes resumes the newest session of a compressed conversation, which the
+                // checks below would not have seen.
+                Some(session) if session.continued => {
+                    return Err(ApiError::forbidden(format!(
+                        "Hermes conversation `{id}` was compressed and continues in a newer session, which Hermes would resume instead. Resume that session by its id (`hermes sessions list` on the machine shows it)."
+                    )));
+                }
                 // Hermes turns a saved YOLO mode back on when it resumes the conversation.
                 Some(session) if session.yolo && !bypass => {
                     return Err(ApiError::forbidden(format!(

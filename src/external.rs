@@ -373,6 +373,9 @@ pub struct HermesSession {
     pub cwd: PathBuf,
     /// Saved in YOLO mode (no approval prompts), which Hermes restores when it resumes the session.
     pub yolo: bool,
+    /// The conversation was compressed and continues in a newer session, which `--resume`
+    /// switches to.
+    pub continued: bool,
 }
 
 pub async fn hermes_session(agent: &Agent, session_id: &str) -> Option<HermesSession> {
@@ -393,6 +396,7 @@ pub async fn hermes_session(agent: &Agent, session_id: &str) -> Option<HermesSes
     Some(HermesSession {
         cwd: PathBuf::from(record["cwd"].as_str()?),
         yolo: hermes_yolo(&record["model_config"]),
+        continued: record["end_reason"] == "compression",
     })
 }
 
