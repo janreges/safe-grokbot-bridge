@@ -152,8 +152,8 @@ Read the [threat model](docs/design.md#6-security-model) and [SECURITY.md](SECUR
 
 | | Linux / WSL 2 | macOS | Windows |
 |---|---|---|---|
-| API, TLS, files, git, headless sessions | ✓ | ✓ | ✓ |
-| tmux sessions | ✓ | ✓ | best effort with [psmux](https://github.com/psmux/psmux) |
+| API, TLS, files, git, headless sessions | ✓ | ✓ | ✓ (processes a finished headless turn leaves behind keep running) |
+| tmux sessions | ✓ | ✓ | best effort with [psmux](https://github.com/psmux/psmux) (sessions the bridge started, one pane each) |
 | External Claude Code sessions | ✓ | ✓ | ✓ |
 
 ## Documentation

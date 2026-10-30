@@ -40,9 +40,14 @@ Notes:
   requests without them never reach your machine. Turn on strict service-token authentication,
   so that failures return `401`/`403` instead of a login page.
 - If requests from your client are answered by a Cloudflare challenge page, a security feature
-  such as Bot Fight Mode or a WAF rule blocks non-browser clients. Add a WAF skip rule for the
-  bridge's hostname. Do not use country-based rules either: Grok Bot's outbound IP addresses
-  change their apparent location.
+  blocks non-browser clients:
+  - a WAF custom rule or *Super* Bot Fight Mode (Pro plans and up): add a WAF skip rule for the
+    bridge's hostname;
+  - the free plan's Bot Fight Mode cannot be skipped by rules: turn it off for the zone, or put the
+    bridge on a hostname in a zone without it.
+
+  Do not use country-based rules either: Grok Bot's outbound IP addresses change their apparent
+  location.
 - Quick tunnels (`cloudflared tunnel --url http://127.0.0.1:4765`) are handy for a first test,
   but their URL changes on every start and they have no Access support.
 
