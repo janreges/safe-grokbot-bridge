@@ -33,6 +33,9 @@ The full threat model is in [docs/design.md](docs/design.md#6-security-model).
   (never a shell) with validated arguments, and git runs with options that keep repository config
   from executing programs.
 
+The first prompt of a tmux session and messages queued for external Codex sessions are passed
+on command lines. Other local users of the same machine can see them with `ps`.
+
 Out of scope:
 
 - a compromised client (for Grok Bot: the account and its cloud computer);

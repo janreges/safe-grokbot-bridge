@@ -229,6 +229,11 @@ key.
 | Unwanted permission bypass | `bypass_permissions` needs a per-workspace opt-in |
 | Slow-loris on a public TLS port | TLS handshake timeout, HTTP header read timeout, connection cap |
 
+**Command lines are visible locally.** The first prompt of a tmux session is passed on the
+agent's command line, and so are messages queued for external Codex sessions (`codex queue`). On
+a machine shared with other local users, they can read these with `ps`. Headless prompts and
+input to running tmux sessions go through stdin and paste buffers instead.
+
 **Out of scope:** a compromised client (the Grok Bot account and its cloud computer), and
 malicious agents or prompt injection inside repositories. Agents keep their own permission
 systems, and the bridge does not try to judge prompts. Users who need hard isolation should run
