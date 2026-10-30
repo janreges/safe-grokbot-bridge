@@ -57,7 +57,9 @@ jobs:
         run: |
           name="safe-grokbot-bridge-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir "$name"
-          cp "target/${{ matrix.target }}/release/safe-grokbot-bridge" README.md LICENSE "$name/"
+          # The documentation goes along, so the README's relative links work in the archive.
+          cp "target/${{ matrix.target }}/release/safe-grokbot-bridge" "$name/"
+          cp -R README.md CHANGELOG.md CONTRIBUTING.md SECURITY.md LICENSE docs "$name/"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
 
@@ -67,7 +69,8 @@ jobs:
         run: |
           $name = "safe-grokbot-bridge-$env:GITHUB_REF_NAME-${{ matrix.target }}"
           New-Item -ItemType Directory $name | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/safe-grokbot-bridge.exe", README.md, LICENSE $name
+          Copy-Item "target/${{ matrix.target }}/release/safe-grokbot-bridge.exe" $name
+          Copy-Item -Recurse README.md, CHANGELOG.md, CONTRIBUTING.md, SECURITY.md, LICENSE, docs $name
           Compress-Archive -Path $name -DestinationPath "$name.zip"
           $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
