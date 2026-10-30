@@ -265,8 +265,9 @@ from the link's target. It never shows file contents.
 
 **Out of scope:** a compromised client (the Grok Bot account and its cloud computer), and
 malicious agents or prompt injection inside repositories. Agents keep their own permission
-systems, and the bridge does not try to judge prompts. Users who need hard isolation should run
-the bridge on a dedicated VM.
+systems, and the bridge does not try to judge prompts. It cannot make an agent's work safe, so
+every installation should run in an isolated environment: a virtual machine, a dedicated WSL 2
+distribution or a separate computer ([where to run it](deployment.md#where-to-run-it)).
 
 **Defense in depth for Cloudflare deployments:** an Access application with a *Service Auth*
 policy bound to one service token. The client adds the `CF-Access-Client-Id` and

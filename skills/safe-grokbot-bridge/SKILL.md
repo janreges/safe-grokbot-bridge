@@ -17,6 +17,11 @@ guides; read them there, or in an unpacked release archive, when a step needs mo
 ## How to work with the user
 
 - Use the user's language and plain words. Keep each step short and say what comes next.
+- Make sure the user knows what they set up: remote access to this machine. The bot reads what
+  they expose and, through the agents it starts or messages, can make this machine run commands
+  and change files. Recommend running it in an isolated environment rather than on their
+  primary workstation (section 0). If they choose their workstation anyway, keep the setup
+  narrow and leave the agents' permission prompts on.
 - Look first, then propose. Find out yourself what is installed and which agents and folders
   exist (section 1). Then send one message with a complete proposal built from what you found,
   and ask only what you cannot know: the machine's name, the host name, the folders and what
@@ -59,6 +64,36 @@ Some steps only the user can do. Tell them exactly what to do, and wait until th
 | Store the bridge's URL and token in the bot's secret store, and install the Grok Bot skill | It happens in the bot's app, with a secret |
 | On WSL 2, create the Windows task that starts WSL at log on | It is a Windows setting |
 
+## 0. Where to run it
+
+Ask, or tell from section 1, whether this machine is meant for agents. On a primary workstation
+with personal data, password managers, browser profiles, SSH keys or production credentials,
+recommend one of these instead, from the most isolated:
+
+- **A virtual machine or a separate computer** (Hyper-V, VirtualBox, VMware, UTM or Parallels,
+  Multipass, a cloud VM). Snapshots make mistakes easy to undo.
+- **A dedicated WSL 2 distribution** on Windows. The user creates it in PowerShell with
+  `wsl --install Ubuntu-24.04 --name agents` (WSL 2.4.4 or newer), then opens it, installs and
+  logs in the agents there, and continues with this skill inside it. In that distribution, add
+  this to `/etc/wsl.conf` (keep its `[boot]` section) and restart it with
+  `wsl --terminate agents`, so that agents can neither read the Windows drives nor start Windows
+  programs:
+
+  ```ini
+  [automount]
+  enabled = false
+
+  [interop]
+  enabled = false
+  appendWindowsPath = false
+  ```
+
+- **At least a separate user account** that owns only the projects the bot works on.
+
+Either way, only the repositories and credentials the work needs belong there, for example a
+GitHub token limited to those repositories. `docs/deployment.md` ("Where to run it") explains
+the reasons.
+
 ## 1. Find out where things stand
 
 Run what applies, then sum up the result in two or three lines:
@@ -74,6 +109,9 @@ gh release view --repo janreges/safe-grokbot-bridge --json tagName -q .tagName  
 uname -sm; ldd --version 2>/dev/null | head -1                    # platform and glibc
 command -v claude codex hermes node git tmux cloudflared         # what is installed
 find ~ -maxdepth 3 -name .git -prune 2>/dev/null | head -40      # git repositories near home
+systemd-detect-virt 2>/dev/null        # vm (kvm, microsoft, oracle, …), wsl, or none (a real machine)
+ls /mnt/c >/dev/null 2>&1 && echo "WSL: Windows drives are mounted"
+ls /proc/sys/fs/binfmt_misc 2>/dev/null | grep -qi wslinterop && echo "WSL: can start Windows programs"
 ```
 
 On WSL 2, `$WSL_DISTRO_NAME` is the distribution's name. On Windows, check the scheduled tasks
@@ -81,6 +119,7 @@ On WSL 2, `$WSL_DISTRO_NAME` is the distribution's name. On Windows, check the s
 
 | What you found | Continue with |
 |---|---|
+| A primary workstation, not an isolated environment | 0 first, then go on where the user wants to run it |
 | Not installed | 3 (agree on the plan), 2 (install), the end of 3 (write the config), 5, 6 |
 | Installed, but `check` finds no config | 3, 5, 6 |
 | A config exists and the user wants a change | 4 |
@@ -325,8 +364,10 @@ pastes it straight into the bot:
 grep -o 'sgb_[A-Za-z0-9_-]*' ~/.config/safe-grokbot-bridge/bridge-token.txt | tr -d '\n' | clip.exe
 ```
 
-That is for WSL 2; on macOS end it with `| pbcopy`, on a Linux desktop with `| wl-copy` or
-`| xclip -selection clipboard`.
+That is for WSL 2 and needs its interop; on macOS end it with `| pbcopy`, on a Linux desktop with
+`| wl-copy` or `| xclip -selection clipboard`. Without a clipboard, for example in a WSL
+distribution with interop off, the user copies the token from the file in their own terminal
+window.
 
 The user then creates the two secrets in the bot's secret store, for Grok Bot a secure secret
 card with `SGB_<NAME>_URL` (the `https://` address) and `SGB_<NAME>_TOKEN`, and installs the

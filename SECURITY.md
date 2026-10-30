@@ -20,6 +20,10 @@ Only the latest release receives security fixes.
 
 The full threat model is in [docs/design.md](docs/design.md#6-security-model).
 
+- The bridge is remote access to the machine it runs on. A client can read what you expose and,
+  through the coding agents it starts or messages, make the machine run commands and change
+  files. Run it in an isolated environment, not on your primary workstation; see
+  [Where to run it](docs/deployment.md#where-to-run-it).
 - A token is as powerful as what its bridge allows: reading the configured folders, and, where
   `input`/`start` are allowed, making agents work there, possibly without permission prompts
   where `allow_bypass_permissions` is set. Treat tokens like SSH keys and rotate them by editing
@@ -45,11 +49,14 @@ Out of scope:
 - a compromised client (for Grok Bot: the account and its cloud computer);
 - the behaviour of the agents themselves, including prompt injection through repository content.
 
-Agents keep their own permission systems. Use a dedicated machine or VM when you need hard
-isolation.
+Agents keep their own permission systems, and a client that may send input can answer their
+prompts. This is why every installation should run in an isolated environment, as described in
+[Where to run it](docs/deployment.md#where-to-run-it).
 
 ## Hardening checklist
 
+- Run the bridge and its agents in a virtual machine, a dedicated WSL 2 distribution or a separate
+  computer that holds only the repositories and credentials the work needs.
 - Keep `listen` on `127.0.0.1` and publish the bridge through a Cloudflare Tunnel. Add an Access
   service-token policy as a second factor.
 - Grant `input` and `start` only on the folders that need them. Keep `allow_bypass_permissions`

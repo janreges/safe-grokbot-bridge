@@ -33,13 +33,19 @@ sequenceDiagram
     CF->>Agent: request through the tunnel to the bridge
 ```
 
+> [!WARNING]
+> The bridge gives Grok Bot remote access to the machine: it can read the folders you expose and
+> make the coding agents there run commands and change files. Set it up on a machine meant for
+> that, such as a virtual machine or a dedicated WSL 2 distribution, not on your primary
+> workstation. See [Where to run it](deployment.md#where-to-run-it).
+
 ## Before you start
 
 - A **Grok Bot**. Bots have a cloud computer with a shell, and a *secure secret card* that turns
   values into environment variables.
 - A **Cloudflare account** with a domain whose DNS is on Cloudflare. The free plan is enough.
-- The **machine**: Linux, WSL 2 or macOS, with Claude Code or Codex logged in, plus `tmux` (for
-  live sessions) and `git`. For native Windows see [deployment](deployment.md#windows). It needs
+- The **machine**: preferably an isolated one (see above) with Linux, WSL 2 or macOS, Claude Code
+  or Codex logged in, `tmux` (for live sessions) and `git`. For native Windows see [deployment](deployment.md#windows). It needs
   no open inbound port, but `cloudflared` connects out to Cloudflare on port **7844** (TCP or
   UDP): a firewall that allows only outbound 443 blocks the tunnel.
 - Pick a **name** for the machine and a **host name** for its bridge. The examples use `pc1` and

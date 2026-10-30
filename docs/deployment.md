@@ -6,6 +6,48 @@ it so that a cloud agent can reach it, and how to keep it running.
 Grok Bot's cloud computer can only open HTTPS connections to host names on port 443. Either of
 the two options below satisfies that.
 
+## Where to run it
+
+The bridge is remote access by design. A client with a token can read what you expose, and
+through the coding agents it starts or messages it can make the machine run programs and
+commands. Those agents run with your user's rights, and their permission prompts are the only
+check on what they do; a client allowed to send input can answer those prompts too. Text in a
+repository or on a web page can steer an agent as well (prompt injection).
+
+So run the bridge and its agents where a mistake costs little, not on your primary workstation
+with your personal data, password manager, browser profiles, SSH keys and production
+credentials. From the most isolated:
+
+- **A virtual machine or a separate computer**: Hyper-V, VirtualBox, VMware, UTM or Parallels on
+  macOS, Multipass, a cloud VM. Snapshots make mistakes easy to undo.
+- **A dedicated WSL 2 distribution** on Windows, used only for agents:
+
+  ```powershell
+  wsl --install Ubuntu-24.04 --name agents   # WSL 2.4.4 or newer; otherwise use wsl --export and --import
+  ```
+
+  By default WSL mounts the Windows drives under `/mnt` and lets Linux programs start Windows
+  programs, which hands your Windows files and account to the agents. Add this to the new
+  distribution's `/etc/wsl.conf` (keep its `[boot]` section), then restart it with
+  `wsl --terminate agents`:
+
+  ```ini
+  [automount]
+  enabled = false
+
+  [interop]
+  enabled = false
+  appendWindowsPath = false
+  ```
+
+  All WSL 2 distributions share one virtual machine and its kernel, so this separates less than
+  a virtual machine does.
+- **At least a separate user account** that owns only the projects the bot works on.
+
+Wherever it runs: keep only the repositories and credentials the work needs there (for example a
+GitHub token limited to those repositories), keep `allow_bypass_permissions` off unless the
+environment is disposable, and review what the agents changed before you merge or deploy it.
+
 ## Option A: Cloudflare Tunnel (recommended)
 
 The bridge keeps listening on `127.0.0.1`, and `cloudflared` on the same machine opens an outbound

@@ -76,7 +76,7 @@ Code, Codex, Hermes) that run there.
 
 | Machine | Secrets | What it is |
 |---|---|---|
-| pc1 | `SGB_PC1_URL`, `SGB_PC1_TOKEN` | main workstation |
+| pc1 | `SGB_PC1_URL`, `SGB_PC1_TOKEN` | agent VM on my workstation |
 | vps | `SGB_VPS_URL`, `SGB_VPS_TOKEN`, `SGB_VPS_PIN` | server with self-signed TLS |
 
 Optional per machine: `SGB_<MACHINE>_ACCESS_ID` and `SGB_<MACHINE>_ACCESS_SECRET` (Cloudflare

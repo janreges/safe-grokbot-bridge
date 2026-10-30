@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- The README, the guides, the security policy and the agent skill say plainly that the bridge is
+  remote access to the machine it runs on, and recommend running it, with the agents it drives,
+  in an isolated environment: a virtual machine, a dedicated WSL 2 distribution or a separate
+  computer. The deployment guide shows how to set up a WSL 2 distribution without access to the
+  Windows drives and programs.
+
 ## [0.2.0] - 2026-10-30
 
 ### Added

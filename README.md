@@ -13,6 +13,16 @@ Code, Codex and Hermes sessions running there, talk to them, and start new ones.
 You keep using your agents as before. The remote agent becomes a coordinator that can hand work to
 them and follow up while you are away from the keyboard, for example from your phone.
 
+> [!WARNING]
+> **This is remote access to your machine.** Depending on your configuration, the remote agent
+> can read files and git history in the folders you expose, and through the coding agents it
+> starts or messages it can make the machine run programs and commands and change files: with
+> the agents' permission prompts, or without them where you allow that. Use the bridge
+> deliberately, only where this is acceptable, and grant as little as the work needs. Run it,
+> together with the agents it drives, in an isolated environment such as a virtual machine, a
+> dedicated WSL 2 distribution or a separate computer, not on your primary workstation with your
+> personal data and credentials. See [Where to run it](docs/deployment.md#where-to-run-it).
+
 ## How it works
 
 ![Cloud computer, Cloudflare edge, the bridge, and the agents on the machine](docs/assets/how-it-works.png)
@@ -199,15 +209,18 @@ the folder where it was held.
 A token lets its holder make coding agents work on your machine, possibly without permission
 prompts if you allow that. Treat it like an SSH key. In short:
 
+- **Isolation:** the agents the bridge drives run with your user's rights. Give them a virtual
+  machine, a dedicated WSL 2 distribution or a separate computer that holds only the projects and
+  credentials the work needs; see [Where to run it](docs/deployment.md#where-to-run-it).
 - **Tokens:** 256-bit, stored as SHA-256 hashes, compared in constant time. A client IP is
   blocked after repeated failures, and each token has a request rate limit.
 - **Network:** plain HTTP only on loopback. Publish it through a Cloudflare Tunnel, optionally
   with an Access service token as a second factor, or enable TLS with key pinning.
 - **Folders:** capabilities per folder; access is read-only by default. Paths are canonicalized,
   so `..` and symlinks cannot escape.
-- **No shell endpoint:** the bridge never runs arbitrary commands. Git runs with options that keep
-  a repository's own config from executing programs, and agents run under their own permission
-  systems.
+- **No shell endpoint:** the bridge itself never runs arbitrary commands, and git runs with
+  options that keep a repository's own config from executing programs. The coding agents it
+  starts do run commands, under their own permission systems.
 
 Read the [threat model](docs/design.md#6-security-model) and [SECURITY.md](SECURITY.md).
 
