@@ -109,6 +109,9 @@ async fn run_turn(
     let mut child = cmd
         .spawn()
         .map_err(|err| format!("Cannot start `{}`: {err}", argv[0]))?;
+    // Windows has no process groups; a job object collects the agent's processes instead.
+    #[cfg(windows)]
+    let job = Job::new(&child);
     #[cfg(unix)]
     drop(folder);
     let pid = child.id();
@@ -193,12 +196,14 @@ async fn run_turn(
                 exited = child.wait() => break exited,
             }
         };
-        // The agent has exited. Whatever it left running in its process group would outlive
-        // the turn unnoticed (and hold its pipes open), so it is stopped too.
+        // The agent has exited. Whatever it left running in its process group or job would
+        // outlive the turn unnoticed (and hold its pipes open), so it is stopped too.
         #[cfg(unix)]
         if let Some(pid) = pid {
             terminate_tree(pid).await;
         }
+        #[cfg(windows)]
+        drop(job);
         // The output may still be in flight, or a descendant that escaped the process group may
         // keep stdout open: take what arrives within a short grace period.
         if open {
@@ -342,6 +347,54 @@ fn truncate(mut text: String, max: usize) -> String {
         text.push_str("\n[… truncated]");
     }
     text
+}
+
+/// The processes of a turn on Windows, where there are no process groups: a job object that
+/// ends every process still in it when it is closed, at the end of the turn.
+#[cfg(windows)]
+struct Job(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Job {
+    fn new(child: &tokio::process::Child) -> Option<Job> {
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+        let process = child.raw_handle()?;
+        // SAFETY: plain Win32 calls on handles owned here; the limit structure is plain data,
+        // and its size is passed along with it.
+        unsafe {
+            let job = Job(CreateJobObjectW(std::ptr::null(), std::ptr::null()));
+            if job.0.is_null() {
+                return None;
+            }
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set = SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            );
+            (set != 0 && AssignProcessToJobObject(job.0, process.cast()) != 0).then_some(job)
+        }
+    }
+}
+
+// SAFETY: a job object handle may be used and closed from any thread.
+#[cfg(windows)]
+unsafe impl Send for Job {}
+
+#[cfg(windows)]
+impl Drop for Job {
+    fn drop(&mut self) {
+        // SAFETY: the handle belongs to this value. Closing it ends the processes in the job.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
 }
 
 /// Stops a turn's process group (Unix) or process tree (Windows) in the background.

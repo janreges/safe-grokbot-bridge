@@ -432,8 +432,9 @@ error message and the end of stderr. A line longer than 4 MiB is cut; since a cu
 be parsed, the turn then counts as failed with an explanation instead of silently losing the
 answer. A turn is killed with its whole process group after `max_turn_secs` or on `DELETE`, and
 the deadline covers draining its output. When the agent exits, whatever it left running in its
-process group is stopped as well, so nothing outlives the turn unnoticed. On Windows this last
-step is missing: processes a finished turn leaves behind keep running.
+process group is stopped as well, so nothing outlives the turn unnoticed. Windows has no
+process groups: there the turn's processes are collected in a job object, which ends whatever
+is left when the agent exits.
 
 Starting a turn checks and changes the session's state under one lock, so concurrent messages
 cannot start two turns: the second gets 409 `busy`. The identity of the session's folder is kept
@@ -507,7 +508,7 @@ soft: when parsing fails, the session simply shows less.
 | Feature | Linux | macOS | Windows |
 |---|---|---|---|
 | API, auth, TLS, files, git | yes | yes | yes |
-| Headless sessions | yes | yes | yes (processes a finished turn leaves behind keep running) |
+| Headless sessions | yes | yes | yes |
 | tmux sessions | yes | yes | best effort with psmux (bridge-started sessions only) |
 | Discovery of user-started tmux panes | yes | yes | no |
 | External Claude sessions (read-only) | yes | yes | yes |
