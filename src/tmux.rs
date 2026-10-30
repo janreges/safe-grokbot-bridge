@@ -8,7 +8,7 @@ use tokio::process::Command;
 
 use crate::exec;
 
-const FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{session_name}\t#{window_activity}\t#{pane_in_mode}\t#{pane_dead}\t#{pane_current_command}\t#{pane_current_path}";
+const FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{session_name}\t#{session_created}\t#{window_activity}\t#{pane_in_mode}\t#{pane_dead}\t#{pane_current_command}\t#{pane_current_path}";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Environment variables that identify the process the bridge itself may run in (a Claude Code
@@ -37,6 +37,8 @@ pub struct Pane {
     pub id: String,
     pub pid: u32,
     pub session: String,
+    /// Unix time the session was created.
+    pub created: u64,
     /// Unix time of the window's last output.
     pub activity: u64,
     /// The pane shows copy mode or another mode, so typed keys would not reach the program.
@@ -47,11 +49,12 @@ pub struct Pane {
 }
 
 fn parse_pane(line: &str) -> Option<Pane> {
-    let mut parts = line.splitn(8, '\t');
+    let mut parts = line.splitn(9, '\t');
     Some(Pane {
         id: parts.next()?.to_string(),
         pid: parts.next()?.parse().ok()?,
         session: parts.next()?.to_string(),
+        created: parts.next()?.parse().unwrap_or(0),
         activity: parts.next()?.parse().unwrap_or(0),
         in_mode: parts.next()? == "1",
         dead: parts.next()? == "1",
@@ -237,12 +240,12 @@ mod tests {
     #[test]
     fn pane_lines_are_parsed() {
         let pane = parse_pane(
-            "%3\t4242\tsgb-app-claude-1a2b3c\t1793315506\t0\t0\tclaude\t/home/me/my app",
+            "%3\t4242\tsgb-app-claude-1a2b3c\t1793315500\t1793315506\t0\t0\tclaude\t/home/me/my app",
         )
         .unwrap();
         assert_eq!(
-            (pane.id.as_str(), pane.pid, pane.activity),
-            ("%3", 4242, 1793315506)
+            (pane.id.as_str(), pane.pid, pane.created, pane.activity),
+            ("%3", 4242, 1793315500, 1793315506)
         );
         assert_eq!(pane.cwd, PathBuf::from("/home/me/my app"));
         assert!(!pane.in_mode && !pane.dead);

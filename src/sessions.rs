@@ -411,23 +411,25 @@ impl Sessions {
         let records: Vec<Arc<Record>> = lock(&self.records).values().cloned().collect();
         let mut sessions = Vec::new();
         let mut in_tmux: HashSet<u32> = HashSet::new();
-        let mut live: HashSet<&str> = HashSet::new();
+        let mut live: HashSet<String> = HashSet::new();
         for pane in &ctx.panes {
             in_tmux.extend(ctx.snapshot.tree(pane.pid, 8).iter().map(|p| p.pid));
             in_tmux.insert(pane.pid);
             let record = records
                 .iter()
-                .find(|r| r.runner == Runner::Tmux && r.id == pane.session);
-            if let Some(record) = record {
+                .find(|r| r.runner == Runner::Tmux && r.id == pane.session)
+                .cloned()
+                .or_else(|| self.adopt(pane));
+            if let Some(record) = &record {
                 if !record.live() {
                     continue;
                 }
-                live.insert(record.id.as_str());
+                live.insert(record.id.clone());
             }
-            sessions.extend(self.tmux_view(ctx, pane, record));
+            sessions.extend(self.tmux_view(ctx, pane, record.as_ref()));
         }
         for record in &records {
-            if record.runner == Runner::Tmux && !live.contains(record.id.as_str()) {
+            if record.runner == Runner::Tmux && !live.contains(&record.id) {
                 let mut state = record.state();
                 if state.phase == Phase::Idle {
                     // The tmux session disappeared (the agent exited or someone killed it).
@@ -435,7 +437,7 @@ impl Sessions {
                     state.ended_at = Some(SystemTime::now());
                 }
             }
-            if record.runner == Runner::Headless || !live.contains(record.id.as_str()) {
+            if record.runner == Runner::Headless || !live.contains(&record.id) {
                 sessions.extend(self.record_view(record));
             }
         }
@@ -444,6 +446,40 @@ impl Sessions {
             sessions.extend(self.codex_views(ctx, &in_tmux));
         }
         sessions
+    }
+
+    /// Takes over a bridge-named tmux session (`sgb-<dir>-<agent>-<hex>`) that has no record:
+    /// one started before a restart of the bridge, or with `safe-grokbot-bridge launch`.
+    fn adopt(&self, pane: &Pane) -> Option<Arc<Record>> {
+        let rest = pane.session.strip_prefix("sgb-")?;
+        let (prefix, suffix) = rest.rsplit_once('-')?;
+        if suffix.len() != 6 || !suffix.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let agent = self
+            .config
+            .agents
+            .iter()
+            .filter(|a| prefix.ends_with(&format!("-{}", a.name)))
+            .max_by_key(|a| a.name.len())?;
+        let cwd = dunce::canonicalize(&pane.cwd).ok()?;
+        let workspace = paths::workspace_for(&self.config, &cwd)?;
+        let events = matches!(agent.kind, AgentKind::Claude | AgentKind::Codex)
+            .then(|| self.events_dir.join(format!("{}.jsonl", pane.session)));
+        let record = Arc::new(Record {
+            id: pane.session.clone(),
+            agent: agent.clone(),
+            runner: Runner::Tmux,
+            cwd,
+            workspace: workspace.name.clone(),
+            keep_alive: true,
+            launch: Launch::default(),
+            started_at: unix_time(pane.created),
+            events,
+            state: Mutex::new(RecordState::default()),
+        });
+        lock(&self.records).insert(record.id.clone(), record.clone());
+        Some(record)
     }
 
     fn tmux_view(
@@ -501,6 +537,7 @@ impl Sessions {
             None => pane.id.clone(),
         });
         session.agent_session_id = claude.and_then(|c| c.session_id.clone());
+        session.started_at = (pane.created > 0).then(|| rfc3339(unix_time(pane.created)));
 
         let (input_at, turn_at) = match record {
             Some(record) => {
@@ -1356,6 +1393,15 @@ fn main_thread_events<'a>(
                     })
                     .and_then(|e| e.session_id.clone());
             }
+            if state.agent_session_id.is_none() {
+                // Without bridge input to match (e.g. after a restart), skip Codex's title
+                // generation, whose answer is a `{"title": …}` object.
+                state.agent_session_id = events
+                    .iter()
+                    .rev()
+                    .find(|e| !is_codex_title(e.message.as_deref()))
+                    .and_then(|e| e.session_id.clone());
+            }
             match &state.agent_session_id {
                 Some(id) => events
                     .iter()
@@ -1366,6 +1412,16 @@ fn main_thread_events<'a>(
         }
         _ => Vec::new(),
     }
+}
+
+fn is_codex_title(message: Option<&str>) -> bool {
+    message
+        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+        .and_then(|v| {
+            v.as_object()
+                .map(|o| o.len() == 1 && o.contains_key("title"))
+        })
+        .unwrap_or(false)
 }
 
 fn claude_state(claude: &ClaudeAgent) -> Option<(SessionState, Option<String>)> {
@@ -1503,6 +1559,7 @@ mod tests {
             id: "%1".into(),
             pid: 1,
             session: "s".into(),
+            created: 0,
             activity,
             in_mode: false,
             dead: false,
@@ -1601,6 +1658,11 @@ mod tests {
         let main = main_thread_events(AgentKind::Codex, &events, &mut state);
         assert_eq!(main.len(), 1);
         assert_eq!(state.agent_session_id.as_deref(), Some("main"));
+        // Without sent texts (adopted after a restart) the title thread is skipped too.
+        let reordered = vec![events[1].clone(), events[0].clone()];
+        let mut adopted = RecordState::default();
+        main_thread_events(AgentKind::Codex, &reordered, &mut adopted);
+        assert_eq!(adopted.agent_session_id.as_deref(), Some("main"));
     }
 
     #[test]

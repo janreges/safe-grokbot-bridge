@@ -627,6 +627,58 @@ fn build_deny(extra: &[String]) -> Result<DenyRules> {
     })
 }
 
+/// The commented config file written by `safe-grokbot-bridge init`.
+pub fn template(token_name: &str, token_hash: &str, workspace: &Path) -> String {
+    let workspace = toml::Value::String(workspace.display().to_string());
+    format!(
+        r#"# safe-grokbot-bridge configuration.
+# Reference: https://github.com/janreges/safe-grokbot-bridge/blob/main/docs/configuration.md
+
+[server]
+# Loopback only; publish it with a Cloudflare Tunnel (or another reverse proxy).
+listen = "{DEFAULT_LISTEN}"
+# name = "workstation"                # shown to clients (default: the host name)
+
+# To listen on a public address (e.g. a VPS), enable TLS. A self-signed certificate is created
+# on first start; `safe-grokbot-bridge check` prints the pin clients use to verify it.
+# Grok Bot can only reach port 443.
+# [server.tls]
+# hostnames = ["bridge.example.com"]
+
+[[tokens]]
+name = "{token_name}"
+sha256 = "{token_hash}"
+
+[limits]
+# auth_failures = 10                  # failed logins per client IP within auth_window_secs …
+# auth_window_secs = 600
+# auth_block_secs = 900               # … block the IP this long
+# requests_per_minute = 300           # per token
+# max_sessions = 8                    # sessions started by the bridge running at once
+
+[sessions]
+# runner = "auto"                     # auto (tmux when available) | tmux | headless
+# max_turn_secs = 3600                # timeout of one headless turn
+
+# [experimental]
+# external_sessions = false           # message Claude Code / Codex sessions running outside tmux
+
+# claude, codex and hermes are built in. Override their command, add flags or environment:
+# [agents.claude]
+# args = ["--model", "opus"]
+# [agents.codex]
+# env = {{ CODEX_HOME = "/home/me/.codex" }}
+
+[[workspaces]]
+path = {workspace}
+# Read-only by default. Add "input" and "start" to let the client drive agents here.
+allow = ["files", "git", "sessions"]
+# agents = ["claude", "codex"]        # which agents may be started here (default: all)
+# allow_bypass_permissions = false    # allow starting agents without permission prompts
+"#
+    )
+}
+
 pub fn default_config_path() -> PathBuf {
     dirs::config_dir()
         .map(|dir| dir.join("safe-grokbot-bridge").join("config.toml"))
@@ -716,6 +768,15 @@ mod tests {
         assert!(parse("[agents.aider]\nargs = []\n", dir.path()).is_err());
         let cfg = parse("[agents.aider]\ncommand = \"aider\"\n", dir.path()).unwrap();
         assert_eq!(cfg.agent("aider").unwrap().kind, AgentKind::Generic);
+    }
+
+    #[test]
+    fn init_template_is_a_valid_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = template("grok", &"ab".repeat(32), dir.path());
+        let cfg = Config::parse(&text, Path::new("t.toml")).unwrap();
+        assert_eq!(cfg.tokens[0].name, "grok");
+        assert!(!cfg.workspaces[0].allows(Capability::Start));
     }
 
     #[test]
