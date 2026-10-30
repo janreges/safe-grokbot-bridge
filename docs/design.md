@@ -237,19 +237,25 @@ key.
 | Path traversal / symlink escape | canonicalize then prefix-check against canonical workspace roots; a file is opened without following a final symlink or blocking on a FIFO, and the open handle must still be the authorized file (Linux: the handle's own path; elsewhere: the path resolved again and compared with the handle), so swapping a file or folder during a request is refused |
 | Secret files exfiltrated via file API | default deny patterns plus user patterns |
 | Argument injection into git / agents / tmux | argv only, no shell; `--end-of-options` for git revisions; strict validation of revisions, model names, key names; prompts go through stdin or as the final argument after the options; messages for `codex queue` are one `--message=…` argument; the tmux start directory is escaped for tmux's format language (`#(…)` there would run a command) and arguments ending in `;` are escaped |
+| A project's own program run instead of the agent | an agent's command is resolved to an absolute path before the agent starts in the project folder, and relative `PATH` entries (`.`, `bin`) are skipped, so a repository cannot put its own `claude` in the way |
 | Malicious repo git config (fsmonitor, external diff, textconv, filter drivers, submodules, transports) | git runs with `--no-pager`, `-c core.fsmonitor=false`, `--no-ext-diff`, `--no-textconv`, `--ignore-submodules=all`, `-c diff.submodule=short`, every configured filter driver blanked (`-c filter.<name>.clean=` …; git is not run when the filter list cannot be read completely, or when a driver's name contains `=` and so cannot be overridden), all transports disabled (`GIT_ALLOW_PROTOCOL=` and `GIT_NO_LAZY_FETCH=1`, so a partial clone cannot fetch through a configured `core.sshCommand`), the bridge's own `GIT_*` variables removed and `GIT_OPTIONAL_LOCKS=0` |
-| Git output from outside the allowed folders | the repository root must be in a workspace with `git`, and so must every place its history is read from: the git directory, the common directory of linked worktrees, the object store, its alternates and links inside it (loose-object folders, `pack` and pack files; a `.git` file can point anywhere; see §5). A store that cannot be listed completely is refused |
-| Text reaching a shell instead of an agent | the bridge types only into panes where nothing but the agent can receive it: its own sessions, panes whose program is the file of the agent's configured command, and panes where no process between the pane and the agent can read the terminal after its child exits. Only a shell running one simple command (`sh -c "claude"`) ends with its program; an interactive shell, a script or a compound command (`claude; exec bash`) does not. An agent is its executable, or a script an interpreter runs (`vim codex` is not Codex). With psmux on Windows, a session with several panes takes no typed input, because psmux addresses the active pane. The pane's process is checked again right before the paste and before every Enter, so a pane respawned meanwhile gets nothing. A shell-hosted agent is read-only, or takes text through its own messaging when experimental external sessions are on |
+| Git output from outside the allowed folders | the repository root must be in a workspace with `git`, and so must every place its history is read from: the git directory, the common directory of linked worktrees, the object store, its alternates and links inside it (loose-object folders and objects, `pack` and pack files, `info` and its commit graphs; a `.git` file can point anywhere; see §5). A store that cannot be listed completely is refused, and so are alternates in Git's quoted form |
+| Text reaching a shell instead of an agent | the bridge types only into panes where nothing but the agent can receive it: its own sessions, panes whose program is the file of the agent's configured command, and panes where no process between the pane and the agent can read the terminal after its child exits. Only a shell running one simple command (`sh -c "claude"`) ends with its program; an interactive shell, a script or a compound command (`claude; exec bash`) does not. An agent is its executable, or a script an interpreter runs (`vim codex` is not Codex). A pane takes no typed input while `synchronize-panes` is on in its window and the window has other panes, because tmux would copy every key to them; with psmux on Windows, neither does a session with several panes, because psmux addresses the active pane. The pane's process is checked again right before the paste, before every Enter and before every key, so a pane respawned meanwhile gets nothing. A shell-hosted agent is read-only, or takes text through its own messaging when experimental external sessions are on |
 | Reading conversations from other folders | `resume` requires the conversation to have been held in the requested `cwd`: the first `cwd` of the Claude transcript (not its lossy project folder name), the Codex rollout's `cwd`, the Hermes session record; Hermes is pinned to `cwd` with `--in`. External sessions show transcripts and take messages only when their conversation began in their current folder (a Claude conversation resumed or moved there with `/cd` does not), and a running Codex that resumed a conversation from another folder is not matched to it. A compressed Hermes conversation, which Hermes would resume in a newer session, is refused |
 | Unwanted permission bypass | `bypass_permissions` needs a per-workspace opt-in; a Hermes conversation saved in YOLO mode, which Hermes restores on resume, can only be resumed with `bypass_permissions` |
-| Slow-loris / connection exhaustion on a public TLS port | HTTP/1.1 only; per-connection task with a 10 s TLS handshake timeout; first request within 15 s; idle connections closed after 150 s; header read timeout; at most 512 connections, 32 per client address |
+| Slow-loris / connection exhaustion on a public TLS port | HTTP/1.1 only; per-connection task with a 10 s TLS handshake timeout; first request within 15 s; idle connections closed after 150 s; header read timeout; at most 512 connections, 32 per client address, where an IPv6 client's /64 network counts as one address; `/healthz` answers and rejected requests close their connection |
 | Memory exhaustion | file reads only of regular files, capped while reading, at most 8 file operations at once; listings read `.gitignore` files themselves, through a handle that must be a regular file, read up to 1 MiB, never following a final link or blocking on a pipe; agent output read line by line with caps; request bodies capped at 1 MiB |
-| Log flooding by unauthenticated clients | rejected requests are logged with a shortened path, requests from a blocked address are not logged one by one, and dropped connections are logged at most once a minute with their count |
+| Log flooding by unauthenticated clients | rejected requests are logged with a shortened method and path, requests from a blocked address are not logged one by one, and dropped connections are logged at most once a minute with their count |
 
 **Command lines are visible locally.** The first prompt of a tmux session is passed on the
 agent's command line, and so are messages queued for external Codex sessions (`codex queue`). On
 a machine shared with other local users, they can read these with `ps`. Headless prompts and
 input to running tmux sessions go through stdin and paste buffers instead.
+
+**Listings follow paths.** A file is read through a handle that must still be the authorized
+file, but a listing walks folders by path. If someone with write access to a workspace replaces
+a subfolder with a link while a deep listing runs, the listing can show names, sizes and times
+from the link's target. It never shows file contents.
 
 **Out of scope:** a compromised client (the Grok Bot account and its cloud computer), and
 malicious agents or prompt injection inside repositories. Agents keep their own permission
@@ -403,13 +409,17 @@ Used for live, interactive sessions. Requires tmux 3.0 or newer, or psmux on Win
   - Hermes and generic agents: `working` while the pane produced output within the last 3 s
     (`#{window_activity}`), otherwise `idle`. This is an estimate, and the session's `note` says
     so.
+  - tmux measures activity per window, so another pane in the agent's window that keeps
+    printing makes the agent look busy, also after a Codex turn has ended. A `keep_alive: false`
+    session is then closed only once that pane goes quiet.
   - A vanished pane is `exited`, but only when tmux answered: if the pane list cannot be read,
     sessions are reported as `unknown` and the list carries a warning. A session counts as
     vanished only if it was running before tmux was queried, so a start that completes during a
     listing is never mistaken for one. A dead pane kept by `remain-on-exit` counts as exited too.
-- **keep_alive = false:** once a turn completes (hook event, or Claude's own idle status after
-  being busy), the bridge stores the final screen, kills the tmux session and marks it
-  `finished`. Only Claude Code and Codex report finished turns, so other agents must use the
+- **keep_alive = false:** once a turn completes (a hook event after the last text the bridge
+  submitted, also for a turn started with keys, or Claude's own idle status after being busy)
+  and the session is idle, the bridge stores the final screen, kills the tmux session and marks
+  it `finished`. Only Claude Code and Codex report finished turns, so other agents must use the
   headless runner for this. A failed kill is reported instead of being recorded as success. The
   conversation stays resumable through `resume`.
 
