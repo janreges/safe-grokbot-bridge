@@ -155,6 +155,22 @@ pub fn claude_inbox(claude_dir: &Path, pid: u32) -> Option<ClaudeInbox> {
     Some(ClaudeInbox { socket, token })
 }
 
+/// Put in front of every message sent through an agent's own messaging. Claude Code shows such a
+/// message as coming from another session without saying who is behind it, and an agent that
+/// cannot tell guesses a sender and sends its answer there. The bridge reads the answer from the
+/// transcript, so the note asks for it to be written there.
+const NOTE: &str = "[This message comes from a remote client connected through \
+safe-grokbot-bridge, not from another session. Answer in this conversation: the client reads \
+your last reply from this session's transcript. Do not send your answer to other sessions \
+unless this message asks you to.]";
+
+/// `text` with the note in front of it. A single space separates them, not a blank line: `codex
+/// queue` takes the message as one argument, and Rust refuses CR and LF in the arguments of a
+/// Windows `.cmd` launcher, so a message that was one line must stay one line.
+pub fn framed(text: &str) -> String {
+    format!("{NOTE} {text}")
+}
+
 /// The two lines posted to an inbox: the auth line (required on Windows) and a user message in
 /// Claude Code's stream-json input format.
 pub fn claude_inbox_lines(token: Option<&str>, text: &str) -> String {
@@ -764,6 +780,19 @@ mod tests {
         assert!(!saved(r#"{"max_iterations": 150}"#));
         assert!(!saved(r#"{"yolo_mode": false}"#));
         assert!(!saved("not json"));
+    }
+
+    #[test]
+    fn framed_messages_keep_the_text_and_ask_for_the_answer_here() {
+        let message = framed("run the tests");
+        assert!(message.ends_with(" run the tests"));
+        assert!(message.contains("remote client"));
+        assert!(message.contains("Answer in this conversation"));
+        assert!(message.contains("Do not send your answer to other sessions"));
+        // A one-line message stays one line, which a Windows `.cmd` launcher requires.
+        assert!(!message.contains(['\r', '\n']));
+        // The newlines of the text itself are left alone.
+        assert_eq!(framed("a\nb").matches('\n').count(), 1);
     }
 
     #[test]

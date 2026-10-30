@@ -480,10 +480,8 @@ Sessions running outside tmux, for example in a plain terminal tab or an IDE.
   - Claude: the session becomes controllable. Text is posted to its inbox socket (path from
     `~/.claude/sessions/<pid>.json`, auth token from the published key file) as
     `{"type":"user","message":{"role":"user","content":"…"}}`. The last answer is read from the
-    session transcript. The receiving session applies its own `crossSessionInbound` rules: by
-    default a session running with permission prompts bypassed *holds* such messages for local
-    approval, so set `"crossSessionInbound": "accept"` in those sessions' settings for unattended
-    use.
+    session transcript. The receiving session applies its own `crossSessionInbound` rules, see
+    *Messages held for approval* below.
   - Codex: live Codex TUIs found by process scan are matched to their thread through the rollout
     files of their `CODEX_HOME`. On Linux the match is exact: the native Codex binary keeps the
     rollouts of its thread and its subagents open, and the newest terminal thread among them
@@ -505,6 +503,41 @@ Sessions running outside tmux, for example in a plain terminal tab or an IDE.
   Until its answer arrives (for at most 10 minutes) the session counts as `working`, so a
   long-poll waits for the new answer instead of returning the previous one. For Codex the answer
   must come from a turn that started after the message was sent.
+- **Message note:** every text sent this way starts with a short note (`external::framed`) saying
+  that it comes from a remote client connected through the bridge, not from another session, and
+  asking the agent to answer in that conversation and not to send its answer to other sessions.
+  Claude Code presents the message as coming from a peer session without saying who is behind
+  it, and an agent that cannot tell guesses a sender and sends its answer there, where the
+  client never reads it. The note is advice to the agent, not a control: what the client may do
+  is still decided by the workspace capabilities alone.
+- **Messages held for approval (Claude Code):** the bridge cannot see what the receiving session
+  does with a message once it is posted. This follows Claude Code's documentation of
+  [cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging.md#control-inbound-messages)
+  and of the [`crossSessionInbound` setting](https://code.claude.com/docs/en/settings-reference#crosssessioninbound),
+  which were not tested end to end here. With no `crossSessionInbound` value in effect, Claude
+  Code decides per message from the permission modes of the two sessions. The bridge's plain
+  `user` messages state no mode, so a session that runs with permission prompts bypassed *holds*
+  them for approval, and any other session receives them. So:
+  - Nothing needs to be changed in sessions that run with permission prompts.
+  - In a session that runs without them, the person at its terminal approves the message in the
+    dialog Claude Code opens there. A dialog left unanswered for `dialogExpiry` (5 minutes by
+    default, set in user or managed settings) is closed and the message dropped. A session that
+    cannot show the dialog, such as one in the VS Code extension or the Desktop app, keeps the
+    message until the same deadline.
+  - For unattended use, the owner can set `"crossSessionInbound": "accept"`. That is a choice,
+    not a default: it applies to every cross-session message the session receives, not only the
+    bridge's, and these are the sessions that run commands without asking. Claude Code reads
+    managed settings first, then the `--settings` flag, then user settings, and applies the
+    first value it finds. A project or local settings file counts only when it is stricter
+    (`hold` or `refuse`), so an `accept` there has no effect. Two places work:
+    `~/.claude/settings.json`, which applies to every session of that user, and a `--settings`
+    value for one session (`claude --settings '{"crossSessionInbound":"accept"}'`), which
+    applies only to a session started with it, so an already running session has to be
+    restarted (`claude --resume` continues the conversation).
+  - A held message is released when a mode or settings change allows it before the deadline.
+  - A held message looks like a delivered one: the session shows `working` for up to 10 minutes
+    and `last_message_at` does not change. The `note` of the session says so, and the client
+    skill tells the client to report it after waiting and not to send the message again.
 
 External sessions have the ids `claude-<session id>` and `codex-<thread id>`. These paths rely
 on formats that are not stable public interfaces. They are isolated in `external.rs` and fail

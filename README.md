@@ -260,9 +260,13 @@ Read the [threat model](docs/design.md#6-security-model) and [SECURITY.md](SECUR
 - **The bridge runs as a service and cannot find `claude` or `codex`.** Services get a minimal
   `PATH`. Set absolute `command` paths in `[agents.*]`, or set `PATH` in the service definition,
   and run `safe-grokbot-bridge check` in the same environment.
-- **A Claude Code session outside tmux does not react to messages (experimental).** Sessions
-  that run without permission prompts hold messages from other processes for local approval. Set
-  `"crossSessionInbound": "accept"` in that session's Claude Code settings.
+- **A Claude Code session outside tmux does not react to messages (experimental).** A session
+  that runs without permission prompts may hold a message from another process for local
+  approval, and drops it after a few minutes. Approve it in that session. For unattended use,
+  set `"crossSessionInbound": "accept"` on purpose, in `~/.claude/settings.json` (all your
+  sessions) or with `--settings` for one session you start; a project or local settings file
+  cannot grant it. It applies to every cross-session message the session receives. The
+  [design](docs/design.md#84-external-sessions-experimental) has the details.
 
 ## Contributing
 

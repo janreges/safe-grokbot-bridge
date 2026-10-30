@@ -18,6 +18,17 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- Messages sent to a session through the agent's own messaging (the Claude Code inbox and
+  `codex queue`) now start with a short note: the message comes from a remote client, the agent
+  should answer in that conversation, and it should not send its answer to other sessions.
+  Agents that were not told who sent a message guessed a sender and answered another session,
+  and the client never saw the answer.
+- The guides and both skills no longer tell people to set `crossSessionInbound` to `accept`.
+  They explain that a Claude Code session running without permission prompts may hold a message
+  for local approval, and what the options are: approve it in the session, or set
+  `crossSessionInbound` on purpose in the user settings or with `--settings` (a project or local
+  settings file cannot grant it), with what that affects. The note on such sessions in the API
+  says the same and tells a client that sent a message not to resend it.
 - The README, the guides, the security policy and the agent skill say plainly that the bridge is
   remote access to the machine it runs on, and recommend running it, with the agents it drives,
   in an isolated environment: a virtual machine, a dedicated WSL 2 distribution or a separate

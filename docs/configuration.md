@@ -126,7 +126,7 @@ required.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `external_sessions` | `false` | Let clients message agent sessions the bridge cannot type into: sessions running **outside** tmux, and Claude Code or Codex started from a shell inside a tmux pane. Claude Code sessions get messages through their inbox socket, Codex sessions through `codex queue`, and their answers are read from transcripts. Without it, Claude Code sessions outside tmux are still listed read-only. See the [design](design.md#84-external-sessions-experimental) for the details and limits. |
+| `external_sessions` | `false` | Let clients message agent sessions the bridge cannot type into: sessions running **outside** tmux, and Claude Code or Codex started from a shell inside a tmux pane. Claude Code sessions get messages through their inbox socket, Codex sessions through `codex queue`, and their answers are read from transcripts. Every message starts with a short note saying that it comes from a remote client and asking the agent to answer in that conversation. Without it, Claude Code sessions outside tmux are still listed read-only. See the [design](design.md#84-external-sessions-experimental) for the details and limits. |
 
 ## `[agents.<name>]`
 

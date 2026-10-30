@@ -78,6 +78,19 @@ sgb pc1 POST /v1/sessions /tmp/start.json
 
 - **Send each message once.** If a request was slow or a wait ended while the agent still works,
   check the session state. Never send the same text again; the agent would do the work twice.
+- **Write messages that stand alone, and ask for the answer in the reply.** An agent that someone
+  is already working with does not know our conversation either. The bridge adds a short note
+  saying the message comes from a remote client. You read `last_message`, so do not ask the
+  agent to report to other sessions or elsewhere.
+- **No reaction is not a reason to send again.** A Claude Code session that runs without
+  permission prompts may hold a message from outside for local approval and drop it after a few
+  minutes, and the bridge cannot see that. If you sent a message to a session and
+  `last_message_at` has not changed after a few minutes of waiting, tell me which session it is
+  and that the message may be waiting for approval there. Do not send it again. Do not suggest
+  changing Claude Code settings unless I ask how to make this unattended; then explain that
+  `crossSessionInbound: accept`, set on purpose in my user settings or with `--settings` for one
+  session (a project or local settings file cannot grant it), is the option, and that it applies
+  to all messages the session receives from other sessions.
 - **Do not wait forever.** If a session is still working after about 15 minutes of waiting, tell
   me what it is doing (from `screen` or `last_message`) and stop waiting, unless I asked you to
   wait until it finishes.

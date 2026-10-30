@@ -1064,7 +1064,7 @@ impl Sessions {
                     session.last_message_at = Some(at).filter(|at| !at.is_empty());
                 }
                 session.note = Some(if inbox.is_some() {
-                    "Experimental: text is delivered to the session's inbox. A session running without permission prompts holds such messages for local approval unless its `crossSessionInbound` setting is `accept`."
+                    "Experimental: text is delivered to the session's inbox, with a short note in front saying that it comes from a remote client. A session running without permission prompts may hold such a message for local approval and drop it after a few minutes, which the bridge cannot see. If you sent a message to this session and `last_message_at` still has not changed after a few minutes, tell the machine's owner that it may be waiting for approval there, and do not send it again."
                 } else {
                     "Experimental messaging is on, but this session has no inbox socket (Claude Code before 2.1.224, or a session that is not running)."
                 }
@@ -1882,6 +1882,7 @@ impl Sessions {
     }
 
     async fn send_external(&self, session: &Session, text: &str) -> Result<(), ApiError> {
+        let text = external::framed(text);
         let failed = |err: anyhow::Error| {
             ApiError::new(
                 StatusCode::BAD_GATEWAY,
@@ -1901,7 +1902,7 @@ impl Sessions {
                     .ok_or_else(|| {
                         ApiError::conflict("not_controllable", "The session's inbox is gone.")
                     })?;
-                external::claude_send(&inbox, text).await.map_err(failed)
+                external::claude_send(&inbox, &text).await.map_err(failed)
             }
             AgentKind::Codex => {
                 let home = session
@@ -1909,7 +1910,7 @@ impl Sessions {
                     .clone()
                     .ok_or_else(|| ApiError::internal("missing CODEX_HOME"))?;
                 let thread = session.agent_session_id.clone().unwrap_or_default();
-                external::codex_queue(agent, &home, &thread, text)
+                external::codex_queue(agent, &home, &thread, &text)
                     .await
                     .map(drop)
                     .map_err(failed)

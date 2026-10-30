@@ -212,6 +212,13 @@ Only when it applies:
 - **No tmux:** sessions then run headless, one run per message. Offer to install tmux.
 - **Agents in plain terminal tabs or an IDE** that the bot should message as well:
   `[experimental] external_sessions = true`. It is off by default; say that it is experimental.
+  The bridge puts a short note in front of every such message that asks the agent to answer in
+  its conversation. Claude Code sessions that run without permission prompts may still hold a
+  message for local approval. Do not change the user's Claude Code settings for that. Tell them
+  the choice instead: approve the message in that session, or set `crossSessionInbound` to
+  `accept` on purpose, in their user settings (all sessions) or with `--settings` for one
+  session they start (a project or local settings file cannot grant it; docs/design.md §8.4
+  says what it affects), and let them decide.
 
 Show the plan and wait for a yes, for example:
 
