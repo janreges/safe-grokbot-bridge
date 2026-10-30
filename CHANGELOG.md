@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-30
+
 ### Added
 
 - HTTP API with an OpenAPI 3.1 description (`/openapi.json`, `docs/openapi.json`).
@@ -34,3 +36,6 @@ All notable changes to this project are documented in this file. The format is b
   machine installs and configures the bridge, with prompts to paste on both sides.
 - Release archives for Linux (x86_64, aarch64), macOS (Apple silicon, Intel) and Windows, with
   SHA-256 checksums.
+
+[Unreleased]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/janreges/safe-grokbot-bridge/releases/tag/v0.1.0
