@@ -525,6 +525,20 @@ Focus on behaviour that would hurt if it broke:
 
 CI runs `fmt`, `clippy -D warnings` and the tests on Linux, macOS and Windows.
 
+Fake agents cannot follow the real CLIs, which change often, so the runners are also checked by
+hand against real agents before a release. For 0.1 (Linux under WSL 2, Claude Code 2.1.312,
+Codex CLI 0.166.0, tmux 3.4) these passed:
+
+- Claude Code in tmux with `model` and `effort`, a follow-up message, and `DELETE`;
+- Claude Code headless with `bypass_permissions`, and a follow-up that remembers the first turn;
+- resuming that conversation in a tmux session in the same folder, and refusing it in another;
+- Codex in tmux with `bypass_permissions` and `keep_alive: false`, and headless with a follow-up;
+- a Claude Code session started from a shell inside tmux, messaged through its inbox;
+- a running Codex TUI matched to its own thread, next to finished sessions in the same folder;
+- a bridge restart with a running tmux session, which kept its state and took input afterwards.
+
+Not checked by hand: native Windows with psmux, and macOS.
+
 ## 12. Operational notes
 
 - Run the bridge as the same OS user that runs the agents and owns the tmux server.
