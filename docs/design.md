@@ -397,8 +397,9 @@ Used for live, interactive sessions. Requires tmux 3.0 or newer, or psmux on Win
   The hook appends one JSON line to `<state_dir>/events/<session>.jsonl` and always exits 0, so it
   can never block an agent.
 - **State:**
-  - Claude: `claude agents --json` (`busy`/`waiting`/`idle` plus `waitingFor`), cached for 2 s
-    and refreshed after every start or input. Right after input Claude may still report `idle`,
+  - Claude: `claude agents --json` (`busy`/`waiting`/`idle` plus `waitingFor`), cached for 5 s
+    and refreshed after every start or input. It runs only for listings and Claude sessions; a
+    long-poll looks at its session every 2 s. Right after input Claude may still report `idle`,
     so a turn started by the bridge stays `working` until its Stop hook event arrives. If the
     pane is quiet for 15 s and Claude says `idle`, the turn counts as done even without an event.
   - Codex: a turn started by the bridge's input is `working` until its hook event arrives. If the

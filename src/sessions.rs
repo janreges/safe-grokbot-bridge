@@ -40,7 +40,11 @@ const FINAL_SCREEN_LINES: usize = 500;
 const ACTIVE_SECS: u64 = 3;
 /// A tracked turn without output for this long is probably waiting for the user.
 const WAITING_SECS: u64 = 15;
-const CLAUDE_CACHE: Duration = Duration::from_secs(2);
+/// How long `claude agents --json` results are reused: each query starts a Node.js process, and
+/// long-polls and one-shot sessions look at their state every few seconds.
+const CLAUDE_CACHE: Duration = Duration::from_secs(5);
+/// How often a long-poll looks at its session again.
+const POLL: Duration = Duration::from_secs(2);
 /// How long finished, exited and stopped sessions stay listed.
 const RETENTION: Duration = Duration::from_secs(3600);
 /// How long a message handed to an agent's own messaging counts as unanswered.
@@ -469,7 +473,7 @@ impl Sessions {
         list
     }
 
-    async fn context(&self) -> Context {
+    async fn context(&self, with_claude: bool) -> Context {
         let records = lock(&self.records)
             .values()
             .map(|record| (record.clone(), record.state().phase))
@@ -518,7 +522,11 @@ impl Sessions {
         })
         .await
         .unwrap_or_default();
-        let claude = self.claude_agents().await;
+        let claude = if with_claude {
+            self.claude_agents().await
+        } else {
+            ClaudeList::default()
+        };
         problems.extend(claude.1.iter().cloned());
         Context {
             records,
@@ -576,8 +584,18 @@ impl Sessions {
     /// All sessions in workspaces with the `sessions` capability, optionally only those whose
     /// working directory is under `under`, and the sources that could not be queried.
     pub async fn list(self: &Arc<Self>, under: Option<&Path>) -> (Vec<Session>, Vec<String>) {
+        self.listing(under, true).await
+    }
+
+    /// `list`, optionally without Claude Code's own view of its sessions, which only Claude
+    /// sessions need.
+    async fn listing(
+        self: &Arc<Self>,
+        under: Option<&Path>,
+        with_claude: bool,
+    ) -> (Vec<Session>, Vec<String>) {
         self.cleanup();
-        let context = self.context().await;
+        let context = self.context(with_claude).await;
         let mut sessions = self.collect(&context);
         self.apply_pending(&mut sessions);
         if let Some(under) = under {
@@ -1121,7 +1139,16 @@ impl Sessions {
     }
 
     async fn find(self: &Arc<Self>, id: &str) -> Result<Session, ApiError> {
-        let (sessions, problems) = self.list(None).await;
+        self.cleanup();
+        let record = self.record(id);
+        // A headless session lives in its record alone; tmux and processes add nothing.
+        if let Some(record) = record.as_ref().filter(|r| r.runner == Runner::Headless)
+            && let Some(session) = self.record_view(record, true)
+        {
+            return Ok(session);
+        }
+        let with_claude = record.is_none_or(|r| r.agent.kind == AgentKind::Claude);
+        let (sessions, problems) = self.listing(None, with_claude).await;
         sessions.into_iter().find(|s| s.id == id).ok_or_else(|| {
             let mut message = format!(
                 "No session `{id}` in the workspaces you may see. List sessions with GET /v1/sessions."
@@ -1160,7 +1187,7 @@ impl Sessions {
                 let lines = lines.unwrap_or(DEFAULT_LINES).clamp(1, MAX_LINES);
                 return Ok(self.with_screen(session, lines).await);
             }
-            tokio::time::sleep(Duration::from_secs(1).min(deadline - now)).await;
+            tokio::time::sleep(POLL.min(deadline - now)).await;
         }
     }
 
