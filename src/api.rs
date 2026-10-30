@@ -192,9 +192,14 @@ fn query<T>(query: Result<Query<T>, QueryRejection>) -> Result<T, ApiError> {
     })
 }
 
+/// File listings and reads run on blocking threads. This bounds how many run at once, so a burst
+/// of large reads cannot take all memory.
+static BLOCKING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+
 async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
+    let _permit = BLOCKING.acquire().await.map_err(ApiError::internal)?;
     tokio::task::spawn_blocking(work)
         .await
         .map_err(ApiError::internal)?

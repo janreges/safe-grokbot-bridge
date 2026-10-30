@@ -1,5 +1,6 @@
 //! Read-only file access: directory listings and line ranges of text files.
 
+use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::time::SystemTime;
@@ -181,6 +182,11 @@ pub fn list(
             kind,
         });
     }
+    // The walk went by path: if an ancestor was swapped for a symlink meanwhile, it may have
+    // listed another directory.
+    if dunce::canonicalize(dir).ok().as_deref() != Some(dir) {
+        return Err(changed(dir));
+    }
     let next_offset = truncated.then_some(offset + limit);
     let mut notes = Vec::new();
     if let Some(next) = next_offset {
@@ -249,10 +255,11 @@ pub fn read(
     if metadata.len() > MAX_FILE_BYTES {
         return Err(too_large(metadata.len()));
     }
+    let file = open_checked(path)?;
     // The size may change between the check and the read, so the read itself is capped too.
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|file| file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes))
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(ApiError::internal)?;
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(too_large(bytes.len() as u64));
@@ -268,8 +275,7 @@ pub fn read(
         ));
     }
     let text = String::from_utf8_lossy(&bytes);
-    let lines: Vec<&str> = text.lines().collect();
-    let total = lines.len();
+    let total = text.lines().count();
     let start = start_line.max(1);
     if start > total.max(1) {
         return Err(ApiError::bad_request(format!(
@@ -277,11 +283,12 @@ pub fn read(
         )));
     }
     let end = total.min(start - 1 + max_lines.clamp(1, MAX_LINES));
-    let content = if total == 0 {
-        String::new()
-    } else {
-        lines[start - 1..end].join("\n")
-    };
+    let content = text
+        .lines()
+        .skip(start - 1)
+        .take(end.saturating_sub(start - 1))
+        .collect::<Vec<_>>()
+        .join("\n");
     Ok(FileContent {
         path: path.display().to_string(),
         size: bytes.len() as u64,
@@ -292,6 +299,70 @@ pub fn read(
         next_start_line: (end < total).then_some(end + 1),
         content,
     })
+}
+
+/// Opens a file that was authorized by its canonical path, and makes sure the handle is that
+/// file: someone who can write in the workspace could swap the file, or a folder above it, for a
+/// symlink between the check and the open. The open neither follows a final symlink nor blocks
+/// on a FIFO, and the handle must be a regular file.
+fn open_checked(path: &Path) -> Result<File, ApiError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|err| match err.kind() {
+        std::io::ErrorKind::PermissionDenied => {
+            ApiError::forbidden(format!("`{}` cannot be read: {err}.", path.display()))
+        }
+        _ => changed(path),
+    })?;
+    let metadata = file.metadata().map_err(ApiError::internal)?;
+    if !metadata.is_file() || !opened_as(&file, &metadata, path) {
+        return Err(changed(path));
+    }
+    Ok(file)
+}
+
+/// Whether an open file is the one at `path` now. Linux reports a handle's real path; elsewhere
+/// the path is resolved again and compared with the handle's identity.
+fn opened_as(file: &File, metadata: &std::fs::Metadata, path: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let _ = metadata;
+        std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .is_ok_and(|real| real == path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        let Ok(now) = std::fs::metadata(path) else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if (now.dev(), now.ino()) != (metadata.dev(), metadata.ino()) {
+                return false;
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (now, metadata);
+        dunce::canonicalize(path).is_ok_and(|real| real == path)
+    }
+}
+
+fn changed(path: &Path) -> ApiError {
+    ApiError::conflict(
+        "path_changed",
+        format!(
+            "`{}` changed while it was being opened (it or a folder above it was replaced). Try again; if this keeps happening, something is modifying the folder.",
+            path.display()
+        ),
+    )
 }
 
 pub fn rfc3339(time: SystemTime) -> String {
