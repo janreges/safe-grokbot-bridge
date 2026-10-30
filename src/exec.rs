@@ -110,22 +110,31 @@ pub async fn read_capped(
 /// Finds a program the way a shell would: a path with a separator is used as is, a bare name is
 /// looked up on `PATH` (with `PATHEXT` extensions on Windows).
 pub fn which(program: &str) -> Option<PathBuf> {
-    find_in(program, &std::env::var_os("PATH")?)
+    find_in(program, std::env::var_os("PATH").as_deref())
 }
 
 /// Like [`which`], but searches the `PATH` that `env` (an agent's configured environment) sets.
 pub fn which_with(program: &str, env: &[(String, String)]) -> Option<PathBuf> {
-    match env.iter().find(|(key, _)| key == "PATH") {
-        Some((_, path)) => find_in(program, std::ffi::OsStr::new(path)),
+    // Windows treats environment names case-insensitively (`Path`).
+    let is_path = |key: &str| {
+        if cfg!(windows) {
+            key.eq_ignore_ascii_case("PATH")
+        } else {
+            key == "PATH"
+        }
+    };
+    match env.iter().rev().find(|(key, _)| is_path(key)) {
+        Some((_, path)) => find_in(program, Some(std::ffi::OsStr::new(path))),
         None => which(program),
     }
 }
 
-fn find_in(program: &str, search: &std::ffi::OsStr) -> Option<PathBuf> {
+fn find_in(program: &str, search: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     let path = Path::new(program);
     if path.components().count() > 1 {
         return is_executable(path).then(|| path.to_path_buf());
     }
+    let search = search?;
     let extensions: Vec<String> = if cfg!(windows) {
         std::env::var("PATHEXT")
             .unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
@@ -158,5 +167,18 @@ fn is_executable(path: &Path) -> bool {
     #[cfg(not(unix))]
     {
         path.is_file()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_paths_need_no_search_path() {
+        assert_eq!(find_in("/bin/sh", None), Some(PathBuf::from("/bin/sh")));
+        assert_eq!(find_in("sh", None), None);
+        let dirs = std::ffi::OsString::from("/nonexistent:/bin");
+        assert_eq!(find_in("sh", Some(&dirs)), Some(PathBuf::from("/bin/sh")));
     }
 }
