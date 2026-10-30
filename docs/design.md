@@ -230,21 +230,21 @@ key.
 | Threat | Mitigation |
 |---|---|
 | Internet scanner finds the endpoint | 256-bit random token required on every route except `/healthz`; constant-time comparison of SHA-256 digests; only hashes are stored in config |
-| Brute force / credential stuffing | per-IP lockout after N failures (default 10 per 10 min → blocked 15 min) with `Retry-After`; bounded memory; with 256-bit tokens brute force is infeasible anyway |
+| Brute force / credential stuffing | per-IP lockout after N failures (default 10 per 10 min → blocked 15 min) with `Retry-After`; bounded memory (10 000 addresses; when all of them are blocked, the blocks stay and new addresses are not tracked); with 256-bit tokens brute force is infeasible anyway |
 | Spoofed client IP to dodge lockout | `CF-Connecting-IP` is honoured only when the TCP peer is loopback |
 | Token sniffing | TLS mandatory on non-loopback listeners; self-signed with pinning or user certificate |
 | Runaway client loop | per-token request rate limit; `max_sessions` cap; headless turn timeout |
 | Path traversal / symlink escape | canonicalize then prefix-check against canonical workspace roots; a file is opened without following a final symlink or blocking on a FIFO, and the open handle must still be the authorized file (Linux: the handle's own path; elsewhere: the path resolved again and compared with the handle), so swapping a file or folder during a request is refused |
 | Secret files exfiltrated via file API | default deny patterns plus user patterns |
-| Argument injection into git / agents | argv only, no shell; `--end-of-options` for git revisions; strict validation of revisions, model names, key names; prompts go through stdin or as the final argument after the options |
+| Argument injection into git / agents / tmux | argv only, no shell; `--end-of-options` for git revisions; strict validation of revisions, model names, key names; prompts go through stdin or as the final argument after the options; messages for `codex queue` are one `--message=…` argument; the tmux start directory is escaped for tmux's format language (`#(…)` there would run a command) and arguments ending in `;` are escaped |
 | Malicious repo git config (fsmonitor, external diff, textconv, filter drivers, submodules, transports) | git runs with `--no-pager`, `-c core.fsmonitor=false`, `--no-ext-diff`, `--no-textconv`, `--ignore-submodules=all`, `-c diff.submodule=short`, every configured filter driver blanked (`-c filter.<name>.clean=` …; git is not run when the filter list cannot be read completely), all transports disabled (`GIT_ALLOW_PROTOCOL=` and `GIT_NO_LAZY_FETCH=1`, so a partial clone cannot fetch through a configured `core.sshCommand`), the bridge's own `GIT_*` variables removed and `GIT_OPTIONAL_LOCKS=0` |
 | Git output from outside the allowed folders | the repository root must be in a workspace with `git`, and so must every place its history is read from: the git directory, the common directory of linked worktrees, the object store and its alternates (a `.git` file can point anywhere; see §5) |
-| Text reaching a shell instead of an agent | the bridge types only into panes where nothing but the agent can receive it: its own sessions, whose pane process it checks before every use (a respawned pane counts as exited), and panes with no interactive shell between the pane and the agent; a shell-hosted agent is read-only, or takes text through its own messaging when experimental external sessions are on |
-| Reading conversations from other folders | `resume` requires the conversation to have been held in the requested `cwd`: the first `cwd` of the Claude transcript (not its lossy project folder name), the Codex rollout's `cwd`, the Hermes session record; Hermes is pinned to `cwd` with `--in`. A running Codex that resumed a conversation from another folder is not matched to it |
+| Text reaching a shell instead of an agent | the bridge types only into panes where nothing but the agent can receive it: its own sessions, and panes with no interactive shell between the pane and the agent (an agent is its executable, or a script an interpreter runs; `vim codex` is not Codex). The pane's process is checked again right before the paste and before every Enter, so a pane respawned meanwhile gets nothing. A shell-hosted agent is read-only, or takes text through its own messaging when experimental external sessions are on |
+| Reading conversations from other folders | `resume` requires the conversation to have been held in the requested `cwd`: the first `cwd` of the Claude transcript (not its lossy project folder name), the Codex rollout's `cwd`, the Hermes session record; Hermes is pinned to `cwd` with `--in`. External sessions show transcripts and take messages only when their conversation began in their current folder (a Claude conversation resumed or moved there with `/cd` does not), and a running Codex that resumed a conversation from another folder is not matched to it |
 | Unwanted permission bypass | `bypass_permissions` needs a per-workspace opt-in |
 | Slow-loris / connection exhaustion on a public TLS port | HTTP/1.1 only; per-connection task with a 10 s TLS handshake timeout; first request within 15 s; idle connections closed after 150 s; header read timeout; at most 512 connections, 32 per client address |
 | Memory exhaustion | file reads only of regular files, capped while reading, at most 8 file operations at once; agent output read line by line with caps; request bodies capped at 1 MiB |
-| Log flooding by unauthenticated clients | rejected requests are logged with a shortened path, and requests from a blocked address are not logged one by one |
+| Log flooding by unauthenticated clients | rejected requests are logged with a shortened path, requests from a blocked address are not logged one by one, and dropped connections are logged at most once a minute with their count |
 
 **Command lines are visible locally.** The first prompt of a tmux session is passed on the
 agent's command line, and so are messages queued for external Codex sessions (`codex queue`). On
@@ -360,9 +360,11 @@ Used for live, interactive sessions. Requires tmux 3.0 or newer, or psmux on Win
   experimental external sessions on, a Claude Code or Codex agent there takes text through its
   own messaging instead (§8.4).
 - **Restarts:** bridge-named sessions (`sgb-…`, including those from
-  `safe-grokbot-bridge launch`) are adopted on sight. Their `keep_alive` setting and the last
-  input are kept in `<state_dir>/sessions/<id>.json`, so a `keep_alive: false` session is still
-  closed after its answer.
+  `safe-grokbot-bridge launch`) are adopted at start and on sight, unless an interactive shell
+  sits between the pane and the agent. Their `keep_alive` setting and the last input are kept in
+  `<state_dir>/sessions/<id>.json`, so a `keep_alive: false` session is still closed after its
+  answer. Turn events and saved data of sessions that ended while the bridge was stopped are
+  removed at start, once the retention period has passed.
 - **Ids:** a session the bridge started keeps its tmux session name as its id
   (`sgb-<dir>-<agent>-<6hex>`). A pane the user started gets `tmux-<n>` for tmux pane `%<n>`.
   With psmux on Windows, pane ids are not unique across sessions, so only bridge sessions are
@@ -424,10 +426,12 @@ Streams are parsed line by line, with a cap per line and per message. The bridge
 session id, the latest assistant message (shown as progress while the turn runs) and the final
 answer; sending a message clears the previous answer. Claude and Codex must end a turn with a
 result event; a process that exits without one counts as failed. On failure the bridge keeps the
-error message and the end of stderr. A turn is killed with its whole process group after
-`max_turn_secs` or on `DELETE`, and the deadline covers draining its output. When the agent
-exits, whatever it left running in its process group is stopped as well (Unix), so nothing
-outlives the turn unnoticed.
+error message and the end of stderr. A line longer than 4 MiB is cut; since a cut event cannot
+be parsed, the turn then counts as failed with an explanation instead of silently losing the
+answer. A turn is killed with its whole process group after `max_turn_secs` or on `DELETE`, and
+the deadline covers draining its output. When the agent exits, whatever it left running in its
+process group is stopped as well, so nothing outlives the turn unnoticed. On Windows this last
+step is missing: processes a finished turn leaves behind keep running.
 
 Starting a turn checks and changes the session's state under one lock, so concurrent messages
 cannot start two turns: the second gets 409 `busy`. Likewise, `max_sessions` is checked and the
@@ -456,11 +460,14 @@ Sessions running outside tmux, for example in a plain terminal tab or an IDE.
     approval, so set `"crossSessionInbound": "accept"` in those sessions' settings for unattended
     use.
   - Codex: live Codex TUIs found by process scan are matched to their thread through the rollout
-    files of their `CODEX_HOME`: the thread named by `codex resume <id>` if it was held in the
-    process's folder, or else the newest terminal thread (`source: "cli"`, not a `codex exec`
-    run or a subagent's thread) in the same folder that started after the process. A TUI that
-    has not started a thread yet is not listed. When several Codex sessions run in one folder, the bridge cannot tell
-    their threads apart and lists them without input. Text is queued with
+    files of their `CODEX_HOME`. On Linux the match is exact: the native Codex binary keeps the
+    rollouts of its thread and its subagents open, and the newest terminal thread among them
+    (`source: "cli"`) is the session's. Elsewhere it is the thread named by `codex resume <id>`,
+    or else a guess: the newest terminal thread (not a `codex exec` run or a subagent's thread)
+    in the same folder that started after the process. A thread held in another folder never
+    counts, and a TUI that has not started a thread yet is not listed. When a guess could be
+    wrong (several Codex sessions or several recent conversations in the folder), the session is
+    listed as `codex-pid-<pid>` without state, answers or input. Text is queued with
     `codex queue --thread <id> --message <text>`, and Codex delivers it when the thread is idle.
     The last answer is read from the rollout file.
 
@@ -490,7 +497,7 @@ soft: when parsing fails, the session simply shows less.
 | Feature | Linux | macOS | Windows |
 |---|---|---|---|
 | API, auth, TLS, files, git | yes | yes | yes |
-| Headless sessions | yes | yes | yes |
+| Headless sessions | yes | yes | yes (processes a finished turn leaves behind keep running) |
 | tmux sessions | yes | yes | best effort with psmux (bridge-started sessions only) |
 | Discovery of user-started tmux panes | yes | yes | no |
 | External Claude sessions (read-only) | yes | yes | yes |
