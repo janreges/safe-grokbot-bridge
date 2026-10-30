@@ -343,9 +343,16 @@ pub async fn middleware(
             // and the path is shortened: neither may let a client flood the log.
             if err.code != "too_many_failures" {
                 let path: String = uri.path().chars().take(100).collect();
-                tracing::warn!(%ip, %method, path, code = err.code, "request rejected");
+                let method: String = method.as_str().chars().take(16).collect();
+                tracing::warn!(%ip, method, path, code = err.code, "request rejected");
             }
-            return err.into_response();
+            // A client without a valid token gets no kept-alive connection to hold on to.
+            let mut response = err.into_response();
+            response.headers_mut().insert(
+                axum::http::header::CONNECTION,
+                axum::http::HeaderValue::from_static("close"),
+            );
+            return response;
         }
     };
     request.extensions_mut().insert(Caller {

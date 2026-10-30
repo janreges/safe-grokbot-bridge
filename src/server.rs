@@ -135,7 +135,7 @@ async fn serve_tls(listener: TcpListener, router: Router, config: Arc<rustls::Se
             },
             _ = &mut shutdown => break,
         };
-        let Some(slot) = IpSlot::take(&per_ip, peer.ip()) else {
+        let Some(slot) = IpSlot::take(&per_ip, client_network(peer.ip())) else {
             dropped.record(peer, "too many connections from one address");
             continue;
         };
@@ -221,6 +221,22 @@ impl DropLog {
 struct IpSlot {
     map: Arc<Mutex<HashMap<IpAddr, usize>>>,
     ip: IpAddr,
+}
+
+/// What the per-client connection limit counts: an IPv4 address, or an IPv6 /64 network, since
+/// one client usually controls all addresses of a /64.
+fn client_network(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let mut segments = v6.segments();
+                segments[4..].fill(0);
+                IpAddr::V6(segments.into())
+            }
+        },
+        v4 => v4,
+    }
 }
 
 impl IpSlot {
@@ -357,4 +373,22 @@ pub async fn shutdown_signal() {
         _ = terminate => {}
     }
     tracing::info!("shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_limits_count_ipv6_networks() {
+        let a: IpAddr = "2001:db8:1:2:aaaa::1".parse().unwrap();
+        let b: IpAddr = "2001:db8:1:2:bbbb::9".parse().unwrap();
+        let c: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert_eq!(client_network(a), client_network(b));
+        assert_ne!(client_network(a), client_network(c));
+        let v4: IpAddr = "203.0.113.7".parse().unwrap();
+        assert_eq!(client_network(v4), v4);
+        let mapped: IpAddr = "::ffff:203.0.113.7".parse().unwrap();
+        assert_eq!(client_network(mapped), v4);
+    }
 }

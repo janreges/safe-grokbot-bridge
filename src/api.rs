@@ -290,8 +290,9 @@ async fn blocking<T: Send + 'static>(
 
 /// Liveness probe. Needs no token and reveals nothing.
 #[utoipa::path(get, path = "/healthz", tag = "info", security(()), responses((status = 200, description = "The bridge is running", body = String, example = "ok")))]
-async fn healthz() -> &'static str {
-    "ok"
+async fn healthz() -> impl axum::response::IntoResponse {
+    // Needs no token, so it keeps no connection open either.
+    ([(axum::http::header::CONNECTION, "close")], "ok")
 }
 
 /// Overview of this machine and what this token may do here.
