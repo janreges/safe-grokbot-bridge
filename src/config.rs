@@ -485,8 +485,8 @@ fn resolve_tokens(raw: Vec<RawToken>) -> Result<Vec<Token>> {
 
 fn parse_sha256(hex: &str) -> Result<[u8; 32]> {
     let hex = hex.trim();
-    if hex.len() != 64 {
-        bail!("expected 64 hex characters, got {}", hex.len());
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("expected 64 hex characters");
     }
     let mut out = [0u8; 32];
     for (i, byte) in out.iter_mut().enumerate() {
