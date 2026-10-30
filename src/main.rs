@@ -310,6 +310,19 @@ fn launch(path: &Path, agent_name: &str, extra: Vec<String>) -> Result<()> {
             names.join(", ")
         )
     })?;
+    // Arguments that pick a conversation cannot be combined with a new session id.
+    let picks_conversation = extra.iter().any(|arg| {
+        let name = arg.split('=').next().unwrap_or(arg);
+        [
+            "-r",
+            "-c",
+            "--resume",
+            "--continue",
+            "--session-id",
+            "--from-pr",
+        ]
+        .contains(&name)
+    });
     agent.args.extend(extra);
     let cwd = dunce::canonicalize(std::env::current_dir()?)?;
     if paths::workspace_for(&config, &cwd).is_none_or(|ws| !ws.allows(Capability::Sessions)) {
@@ -325,7 +338,7 @@ fn launch(path: &Path, agent_name: &str, extra: Vec<String>) -> Result<()> {
         tls::create_private_dir(&events_dir)?;
     }
     let launch = Launch {
-        claude_session_id: (agent.kind == AgentKind::Claude).then(uuid_v4),
+        claude_session_id: (agent.kind == AgentKind::Claude && !picks_conversation).then(uuid_v4),
         hook: tracked.then(|| HookSpec {
             exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("safe-grokbot-bridge")),
             events: events_dir.join(format!("{name}.jsonl")),
