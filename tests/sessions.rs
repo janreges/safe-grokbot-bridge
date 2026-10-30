@@ -536,6 +536,13 @@ async fn tmux_sessions_take_text_and_keys_and_ignore_other_panes() {
         String::from_utf8_lossy(&out.stdout).trim(),
         odd.display().to_string()
     );
+    // A folder name ending in `;` must not end the tmux command early.
+    let semicolon = h.root.join("odd;");
+    std::fs::create_dir(&semicolon).unwrap();
+    let (status, fourth) = h
+        .post("/v1/sessions", json!({"cwd": semicolon, "agent": "echo"}))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{fourth}");
 
     let _ = tmux(&["kill-server"]);
     // SAFETY: getuid has no preconditions.

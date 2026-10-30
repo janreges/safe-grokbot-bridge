@@ -151,8 +151,9 @@ impl Tmux {
         env: &[(String, String)],
         argv: &[String],
     ) -> Result<Pane> {
-        // tmux expands formats in the start directory, and `#(…)` there runs a shell command.
-        let cwd = cwd.display().to_string().replace('#', "##");
+        // tmux expands formats in the start directory, and `#(…)` there runs a shell command. A
+        // trailing `;` would end the tmux command there.
+        let cwd = escape_separator(&cwd.display().to_string().replace('#', "##"));
         let mut args: Vec<String> = [
             "new-session",
             "-d",
