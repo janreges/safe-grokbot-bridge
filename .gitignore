@@ -2,3 +2,4 @@
 /.plans/
 *.swp
 .DS_Store
+/dev.toml
