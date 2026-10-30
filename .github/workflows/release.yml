@@ -4,8 +4,9 @@ on:
   push:
     tags: ["v*"]
 
+# Only the job that publishes the release may write to the repository.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -86,6 +87,8 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
       - name: Release notes from CHANGELOG.md
