@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -49,6 +50,8 @@ pub struct Auth {
     tokens: Vec<(String, [u8; 32])>,
     limits: Limits,
     client_ip_header: Option<HeaderName>,
+    /// Whether the warning about an unusable client IP header was logged.
+    bad_ip_header: AtomicBool,
     failures: Mutex<HashMap<IpAddr, Failures>>,
     windows: Mutex<HashMap<String, RateWindow>>,
 }
@@ -80,6 +83,7 @@ impl Auth {
                 .collect(),
             limits: config.limits.clone(),
             client_ip_header: config.server.client_ip_header.clone(),
+            bad_ip_header: AtomicBool::new(false),
             failures: Mutex::new(HashMap::new()),
             windows: Mutex::new(HashMap::new()),
         }
@@ -91,12 +95,22 @@ impl Auth {
     pub fn client_ip(&self, peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
         if peer.ip().is_loopback()
             && let Some(name) = &self.client_ip_header
-            && let Some(ip) = headers
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.trim().parse::<IpAddr>().ok())
+            && let Some(value) = headers.get(name)
         {
-            return ip;
+            match value
+                .to_str()
+                .ok()
+                .and_then(|value| value.trim().parse::<IpAddr>().ok())
+            {
+                Some(ip) => return ip,
+                // Behind a proxy that sends a list (`X-Forwarded-For`), every client would share
+                // the proxy's lockout; say so once instead of failing silently.
+                None if !self.bad_ip_header.swap(true, Ordering::Relaxed) => tracing::warn!(
+                    header = name.as_str(),
+                    "the client IP header does not hold a single IP address, so clients are told apart by the proxy's address only; set `client_ip_header` to a header with one address, such as X-Real-IP"
+                ),
+                None => {}
+            }
         }
         peer.ip()
     }
