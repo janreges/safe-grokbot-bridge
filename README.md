@@ -85,18 +85,21 @@ flowchart LR
   - Every request is written to an audit log, and no generic shell endpoint exists.
 - **Made for LLM clients.** A complete [OpenAPI 3.1](docs/openapi.json) description. Every
   response says when it is incomplete and what to do next, and a
-  [ready-made skill](docs/grok-bot.md) teaches Grok Bot to use it.
+  [ready-made skill](docs/grok-bot.md) teaches Grok Bot to use it and to connect new machines.
 - **One binary** for Linux, macOS and Windows. Configuration is one TOML file.
 
 ## Quick start
 
-**With Grok Bot and Cloudflare:** follow [Setup with Grok Bot and Cloudflare](docs/setup.md).
-You paste one prompt into Grok Bot, which creates the tunnel, and one into Claude Code or Codex
-on your machine, which installs and configures the bridge. You only move two secrets by hand.
+**Recommended: two skills do it.** Follow the [quick setup](docs/setup.md#quick-setup-recommended):
 
-**With your coding agent:** install the [agent skill](#agent-skill) and tell Claude Code or Codex
-*"Set up safe-grokbot-bridge on this machine."* It asks you which folders to expose and what the
-bot may do there, then does the rest.
+1. Install the [skills](#agent-skills): one into Grok Bot, one into Claude Code, Codex or Hermes
+   on the machine.
+2. Tell Grok Bot *"Use the safe-grokbot-bridge-client skill to connect a new machine named
+   pc1."* It creates the Cloudflare Tunnel and gives you a setup message. Paste that into your
+   coding agent on the machine: it asks which folders to expose and what the bot may do there,
+   then installs and configures everything. You only move two secrets by hand.
+
+**Step by step with prompts:** [Setup with Grok Bot and Cloudflare](docs/setup.md#setup-step-by-step).
 
 **By hand:**
 
@@ -122,20 +125,25 @@ Tip: start your agents with `safe-grokbot-bridge launch claude` (or `codex`) ins
 They then run in tmux with the bridge's turn hooks, so the remote agent can follow and continue
 your sessions.
 
-## Agent skill
+## Agent skills
 
-This repository is also a plugin marketplace with one skill,
-[`safe-grokbot-bridge`](skills/safe-grokbot-bridge/SKILL.md). It teaches Claude Code, Codex and
-other coding agents to install the bridge, agree with you on the folders it exposes and what the
-bot may do there, write and later change the config, run it as a service, connect the Cloudflare
-Tunnel, upgrade it and troubleshoot it. The agent shows you every plan before it applies it,
-asks before it widens access, and never handles your secrets.
+The repository holds two skills, and is a plugin marketplace for Claude Code and Codex.
 
-| Agent | Install |
+- [`safe-grokbot-bridge`](skills/safe-grokbot-bridge/SKILL.md), for the coding agent on the
+  machine: it installs the bridge, agrees with you on the folders it exposes and what the bot may
+  do there, writes and later changes the config, runs it as a service, connects the Cloudflare
+  Tunnel, upgrades and troubleshoots it. It shows you every plan before it applies it, asks
+  before it widens access, and never handles your secrets.
+- [`safe-grokbot-bridge-client`](skills/safe-grokbot-bridge-client/SKILL.md), for Grok Bot or
+  another client: it uses the API, finds your machines by their secrets, and connects new
+  machines. [Connecting Grok Bot](docs/grok-bot.md#the-skill) shows how to install it.
+
+| Agent on the machine | Install `safe-grokbot-bridge` |
 |---|---|
 | Claude Code | `claude plugin install safe-grokbot-bridge --marketplace janreges/safe-grokbot-bridge` (2.1.292 or newer; before that, `claude plugin marketplace add janreges/safe-grokbot-bridge` and `claude plugin install safe-grokbot-bridge@safe-grokbot-bridge`) |
 | Codex | `codex plugin marketplace add janreges/safe-grokbot-bridge`, then `codex plugin add safe-grokbot-bridge@safe-grokbot-bridge` |
-| Cursor, Gemini CLI, GitHub Copilot, OpenCode and others | `npx skills add janreges/safe-grokbot-bridge -g` |
+| Hermes Agent | `hermes skills install janreges/safe-grokbot-bridge/skills/safe-grokbot-bridge --force` (Hermes blocks community skills that set up services; read it first with `hermes skills inspect`) |
+| Cursor, Gemini CLI, GitHub Copilot, OpenCode and others | `npx skills add janreges/safe-grokbot-bridge --skill safe-grokbot-bridge -g` |
 | Any agent, by hand | Copy `skills/safe-grokbot-bridge/` into the agent's skills folder, such as `~/.claude/skills/` or `~/.agents/skills/` |
 
 Then start a new session and say, for example, *"Set up safe-grokbot-bridge on this machine"* or
@@ -143,7 +151,7 @@ Then start a new session and say, for example, *"Set up safe-grokbot-bridge on t
 
 To update the skill later: `claude plugin update safe-grokbot-bridge@safe-grokbot-bridge` in
 Claude Code; `codex plugin marketplace upgrade safe-grokbot-bridge`, then the `codex plugin add`
-command again in Codex; `npx skills update` elsewhere.
+command again in Codex; `hermes skills update` in Hermes; `npx skills update` elsewhere.
 
 ## Using the API
 

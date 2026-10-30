@@ -2,16 +2,16 @@
 
 ![Three steps: the bot gets a key, a tunnel is built, the machine finishes the setup](assets/setup.png)
 
-This guide connects a [Grok Bot](https://x.ai) to one of your machines in four steps. Most of the
-work is done by agents: Grok Bot creates the Cloudflare Tunnel, and a coding agent on your
-machine (Claude Code or Codex) installs and configures the bridge. You copy the prompts below and
-move two secrets by hand.
+This guide connects a [Grok Bot](https://x.ai) to one of your machines. Most of the work is done
+by agents: Grok Bot creates the Cloudflare Tunnel, and a coding agent on your machine (Claude
+Code, Codex or Hermes) installs and configures the bridge. You answer their questions and move
+two secrets by hand.
 
 | Who | Does what |
 |---|---|
-| **Grok Bot**, in the cloud | Creates the tunnel and its host name through the Cloudflare API, and later uses the bridge |
-| **Claude Code or Codex**, on your machine | Installs the bridge and `cloudflared`, writes the config, starts both as services, verifies |
-| **You** | Create a Cloudflare API token, and copy the two secrets: the tunnel token to the machine, the bridge token to Grok |
+| **Grok Bot**, in the cloud | Creates the tunnel and its host name through the Cloudflare API, writes the setup message for your machine, and later uses the bridge |
+| **Claude Code, Codex or Hermes**, on your machine | Agrees with you on the folders to expose, installs the bridge and `cloudflared`, writes the config, starts both as services, verifies |
+| **You** | Install two skills, create a Cloudflare API token, and copy two secrets: the tunnel token to the machine, the bridge token to Grok Bot |
 
 Secrets never go through a chat. Chats are stored, and a tunnel token lets whoever holds it run
 your tunnel and receive the bot's requests. Each step says where a secret goes.
@@ -21,14 +21,15 @@ sequenceDiagram
     actor You
     participant Grok as Grok Bot
     participant CF as Cloudflare
-    participant Agent as Claude Code / Codex<br/>on your machine
-    You->>Grok: 1. API token, as a secret
-    You->>Grok: 2. prompt "create the tunnel"
+    participant Agent as Claude Code / Codex / Hermes<br/>on your machine
+    You->>Grok: "connect a new machine named pc1"
     Grok->>CF: tunnel, host name, DNS record
-    You->>CF: copy the tunnel token (dashboard)
-    You->>Agent: 3. save the token, prompt "set up the bridge"
+    Grok-->>You: setup message for the machine
+    You->>Agent: paste the setup message
+    Agent-->>You: which folders, and what may the bot do there?
+    You->>Agent: tunnel token from the dashboard, in your own terminal
     Agent->>CF: cloudflared connects the tunnel
-    You->>Grok: 4. URL and bridge token, as secrets, plus the skill
+    You->>Grok: "pc1 is ready", then URL and bridge token in a secret card
     Grok->>CF: HTTPS + bearer token
     CF->>Agent: request through the tunnel to the bridge
 ```
@@ -44,12 +45,110 @@ sequenceDiagram
 - A **Grok Bot**. Bots have a cloud computer with a shell, and a *secure secret card* that turns
   values into environment variables.
 - A **Cloudflare account** with a domain whose DNS is on Cloudflare. The free plan is enough.
-- The **machine**: preferably an isolated one (see above) with Linux, WSL 2 or macOS, Claude Code
-  or Codex logged in, `tmux` (for live sessions) and `git`. For native Windows see [deployment](deployment.md#windows). It needs
+- The **machine**: preferably an isolated one (see above) with Linux, WSL 2 or macOS, Claude Code,
+  Codex or Hermes logged in, `tmux` (for live sessions) and `git`. For native Windows see [deployment](deployment.md#windows). It needs
   no open inbound port, but `cloudflared` connects out to Cloudflare on port **7844** (TCP or
   UDP): a firewall that allows only outbound 443 blocks the tunnel.
 - Pick a **name** for the machine and a **host name** for its bridge. The examples use `pc1` and
   `pc1-bridge.example.com`. Replace them everywhere.
+
+## Quick setup (recommended)
+
+Two skills do the work. One teaches Grok Bot to use the bridge and to connect new machines, the
+other teaches the coding agent on the machine to install and configure the bridge.
+
+### 1. Install the skills
+
+**In Grok Bot**, paste this into a chat with your main bot:
+
+```text
+Download https://raw.githubusercontent.com/janreges/safe-grokbot-bridge/main/skills/safe-grokbot-bridge-client/SKILL.md
+with curl and save its content, unchanged, as a skill named safe-grokbot-bridge-client.
+Then tell me how to enable it for my other bots.
+```
+
+If your bot cannot save a skill from a file, open that link, copy the whole file, and paste it
+into the chat with *"Save this as a skill named safe-grokbot-bridge-client."* Enable the skill
+for every bot that should work with your machines.
+
+**On the machine**, preferably a virtual machine or a dedicated WSL 2 distribution (see the
+warning above), install the other skill into your coding agent, then start a new session so that
+the agent loads it:
+
+<details>
+<summary><b>Claude Code</b></summary>
+
+```bash
+claude plugin install safe-grokbot-bridge --marketplace janreges/safe-grokbot-bridge
+```
+
+This needs Claude Code 2.1.292 or newer. Older versions: `claude plugin marketplace add
+janreges/safe-grokbot-bridge`, then `claude plugin install safe-grokbot-bridge@safe-grokbot-bridge`.
+
+</details>
+
+<details>
+<summary><b>Codex</b></summary>
+
+```bash
+codex plugin marketplace add janreges/safe-grokbot-bridge
+codex plugin add safe-grokbot-bridge@safe-grokbot-bridge
+```
+
+</details>
+
+<details>
+<summary><b>Hermes Agent</b></summary>
+
+```bash
+hermes skills inspect janreges/safe-grokbot-bridge/skills/safe-grokbot-bridge
+hermes skills install janreges/safe-grokbot-bridge/skills/safe-grokbot-bridge --force
+```
+
+Hermes blocks skills from community sources that set up services, tunnels and `sudo` steps,
+which is exactly this skill's job. Read it with `inspect` first; `--force` installs it anyway.
+
+</details>
+
+<details>
+<summary><b>Other agents</b> (Cursor, Gemini CLI, GitHub Copilot, OpenCode, …)</summary>
+
+```bash
+npx skills add janreges/safe-grokbot-bridge --skill safe-grokbot-bridge -g
+```
+
+</details>
+
+### 2. Connect the machine
+
+**2a. In Grok Bot**, in a new chat:
+
+```text
+Use the safe-grokbot-bridge-client skill to connect a new machine named pc1.
+```
+
+The bot asks for your Cloudflare domain and a host name for the machine. The first time, it also
+asks you for a Cloudflare API token and says which permissions it needs. Then it creates the
+tunnel and gives you a short setup message for the machine.
+
+**2b. On the machine**, paste that message into Claude Code, Codex or Hermes. The agent:
+
+- asks which folders the bot may use and what it may do there, and shows you the plan;
+- installs the bridge and `cloudflared`, writes the config and starts both as services;
+- asks you to save the tunnel token, which you copy from the Cloudflare dashboard, in your own
+  terminal;
+- checks that everything answers, and puts the bridge token on your clipboard.
+
+Then go back to Grok Bot and say *"pc1 is ready"*. It asks you to paste the URL and the bridge
+token into a secure secret card, and tests the connection in a new chat. From then on you can
+ask it things like *"On pc1, start Claude Code in ~/projects/app and let it fix the failing
+tests, then tell me what it changed."*
+
+For the next machine, repeat step 2 with another name.
+
+## Setup step by step
+
+These steps do by hand what the skills do: for agents without skills, or to see every detail.
 
 ## Step 1: Give Grok Bot access to Cloudflare (once)
 
@@ -131,7 +230,7 @@ The command runs in Bash also from zsh, the default shell on macOS. Only you can
 and nothing is written when the input is empty.
 
 **3b. Let your coding agent do the rest.** If you installed the
-[agent skill](../README.md#agent-skill), start Claude Code or Codex and say *"Set up
+[agent skill](../README.md#agent-skills), start Claude Code or Codex and say *"Set up
 safe-grokbot-bridge for the Cloudflare Tunnel sgb-pc1 at https://pc1-bridge.example.com."* It
 asks you which folders to expose and what the bot may do there, and continues as below.
 
@@ -206,16 +305,14 @@ starts with `sgb_`. Then delete that file:
 rm ~/.config/safe-grokbot-bridge/bridge-token.txt
 ```
 
-Install the skill that teaches your bots the API: copy it from [Connecting Grok
-Bot](grok-bot.md#the-skill), adjust its machines table, paste it into the chat and say *"Save this
-as a skill named safe-grokbot-bridge."* Enable it for every bot that should work with your
-machines.
+Install the bot's skill as in [step 1 of the quick setup](#1-install-the-skills), if you have
+not yet. It finds your machines by their secrets, so nothing in it needs editing.
 
 Then test it, in a new chat:
 
 ```text
-Use the safe-grokbot-bridge skill: show me what machine pc1 offers (GET /v1/info) and which
-agent sessions run there.
+Use the safe-grokbot-bridge-client skill: show me what machine pc1 offers (GET /v1/info) and
+which agent sessions run there.
 ```
 
 The bot answers with the machine's workspaces, agents and sessions. From now on you can ask it
@@ -245,8 +342,8 @@ The skill's `sgb` helper sends the two headers automatically once these secrets 
 
 ## More machines
 
-Repeat steps 2 to 4 for every machine with its own name (`pc2`, `vps`, …), host name and token,
-and add a row to the skill's machines table. Step 1 is needed only once.
+Repeat steps 2 to 4 for every machine with its own name (`pc2`, `vps`, …), host name and token.
+Step 1 is needed only once.
 
 ## When something does not work
 

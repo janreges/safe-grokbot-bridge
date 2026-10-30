@@ -163,7 +163,10 @@ to (`sudo apt install tmux` for the user to run, or `brew install tmux`). The ag
 
 ## 3. Configure: agree with the user on what the bot gets
 
-The proposal answers these questions. Fill in what you can from section 1:
+The proposal answers these questions. Fill in what you can from section 1. A setup message from
+Grok Bot ("set up this machine for Grok Bot as …") already names the machine, its Cloudflare
+Tunnel and its host name: use them and do not ask again. The tunnel then exists already, and
+section 6 only needs its token.
 
 1. **How does the bot reach this machine?**
    - *Cloudflare Tunnel* (recommended): no open port, the bridge stays on `127.0.0.1:4765`. Ask
@@ -369,11 +372,13 @@ That is for WSL 2 and needs its interop; on macOS end it with `| pbcopy`, on a L
 distribution with interop off, the user copies the token from the file in their own terminal
 window.
 
-The user then creates the two secrets in the bot's secret store, for Grok Bot a secure secret
-card with `SGB_<NAME>_URL` (the `https://` address) and `SGB_<NAME>_TOKEN`, and installs the
-Grok Bot skill from `docs/grok-bot.md` with this machine in its table. In a new chat they ask
-the bot: "Use the safe-grokbot-bridge skill: show me what machine <name> offers." Once that
-works, delete `bridge-token.txt` and check that it is gone. If the clipboard keeps a history
+Then send the user back to the bot. If Grok Bot created the tunnel, they tell it *"<name> is
+ready"*: the bot asks them to paste the URL (`https://<host name>`) and the token into a secure
+secret card, and tests the connection in a new chat. Otherwise they install the bot's skill,
+`safe-grokbot-bridge-client` (`docs/grok-bot.md`), store the two secrets `SGB_<NAME>_URL` and
+`SGB_<NAME>_TOKEN` in a secure secret card, and ask the bot in a new chat: "Use the
+safe-grokbot-bridge-client skill: show me what machine <name> offers." Once the bot reaches the
+machine, delete `bridge-token.txt` and check that it is gone. If the clipboard keeps a history
 (Windows: Win+V), the user clears it.
 
 ## 7. Everyday use

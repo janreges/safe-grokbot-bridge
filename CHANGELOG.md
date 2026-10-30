@@ -12,6 +12,9 @@ All notable changes to this project are documented in this file. The format is b
   it connects a new machine: it creates the Cloudflare Tunnel and writes a short setup message
   for the coding agent on the machine. It finds machines by their secrets, so it needs no
   editing, and Grok Bot can install it from its URL.
+- A quick setup at the top of the guided setup: install the two skills, tell Grok Bot to connect
+  a machine, and paste its message into Claude Code, Codex or Hermes on the machine. The
+  installation commands for each agent, Hermes included, are in collapsible sections.
 
 ### Changed
 
