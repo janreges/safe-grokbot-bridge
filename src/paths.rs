@@ -89,6 +89,29 @@ pub fn require(workspace: &Workspace, capability: Capability) -> Result<(), ApiE
     )))
 }
 
+/// Git reports on a whole repository, not on a folder. So the repository's root must lie in a
+/// workspace that allows `git`, and no workspace nested in the repository may forbid it.
+pub fn require_git_scope(config: &Config, toplevel: &Path) -> Result<(), ApiError> {
+    let Some(workspace) = workspace_for(config, toplevel) else {
+        return Err(ApiError::forbidden(format!(
+            "This folder belongs to the git repository at `{}`, which reaches outside the workspaces this bridge exposes; its history and diffs would include files you may not see.",
+            toplevel.display()
+        )));
+    };
+    require(workspace, Capability::Git)?;
+    if let Some(nested) = config.workspaces.iter().find(|ws| {
+        ws.root.starts_with(toplevel) && ws.root != workspace.root && !ws.allows(Capability::Git)
+    }) {
+        return Err(ApiError::forbidden(format!(
+            "The git repository at `{}` contains workspace `{}` ({}), where `git` is not allowed, so git access to this repository is refused.",
+            toplevel.display(),
+            nested.name,
+            nested.root.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Canonicalizes the longest existing prefix of a path that may not exist (yet), so that it can
 /// be compared with canonical workspace roots even on systems with symlinked prefixes (macOS
 /// `/var` → `/private/var`).
@@ -151,12 +174,38 @@ mod tests {
         std::fs::write(inner.join("a.txt"), "x").unwrap();
         let cfg = config(&[
             (dir.path(), "[\"files\"]"),
-            (&inner, "[\"files\", \"start\"]"),
+            (&inner, "[\"files\", \"sessions\", \"start\"]"),
         ]);
         let resolved = resolve(&cfg, inner.join("a.txt").to_str().unwrap()).unwrap();
         assert!(resolved.workspace.allows(Capability::Start));
         assert_eq!(resolved.rel, Path::new("a.txt"));
         assert!(require(resolved.workspace, Capability::Git).is_err());
+    }
+
+    #[test]
+    fn git_scope_covers_the_whole_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dunce::canonicalize(dir.path()).unwrap();
+        let public = repo.join("public");
+        let private = repo.join("private");
+        std::fs::create_dir_all(&public).unwrap();
+        std::fs::create_dir_all(&private).unwrap();
+        // Only a subfolder is exposed: the repository root is outside every workspace.
+        let cfg = config(&[(&public, "[\"git\"]")]);
+        assert_eq!(
+            require_git_scope(&cfg, &repo).unwrap_err().code,
+            "forbidden"
+        );
+        // The root is exposed, but a nested workspace forbids git.
+        let cfg = config(&[(&repo, "[\"git\"]"), (&private, "[\"files\"]")]);
+        assert!(
+            require_git_scope(&cfg, &repo)
+                .unwrap_err()
+                .message
+                .contains("contains workspace")
+        );
+        let cfg = config(&[(&repo, "[\"git\"]")]);
+        assert!(require_git_scope(&cfg, &repo).is_ok());
     }
 
     #[test]

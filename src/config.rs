@@ -327,8 +327,9 @@ impl Workspace {
     }
 }
 
-/// Compiled deny patterns. Patterns without `/` are checked against every path component,
-/// patterns with `/` against the whole path relative to the workspace root.
+/// Compiled deny patterns. Patterns without `/` are checked against every path component;
+/// patterns with `/` are anchored at the workspace root and checked against the path and each of
+/// its ancestors, so a denied directory also denies everything inside it.
 #[derive(Debug, Clone)]
 pub struct DenyRules {
     names: GlobSet,
@@ -348,9 +349,12 @@ impl DenyRules {
                     joined.push('/');
                 }
                 joined.push_str(&name);
+                if self.paths.is_match(&joined) {
+                    return true;
+                }
             }
         }
-        !joined.is_empty() && self.paths.is_match(&joined)
+        false
     }
 }
 
@@ -573,6 +577,13 @@ fn resolve_workspaces(raw: Vec<RawWorkspace>, agents: &[Agent]) -> Result<Vec<Wo
                 .into_iter()
                 .collect()
         });
+        // Starting or driving a session is useless without seeing it, and the API returns the
+        // session after the action.
+        if (allow.contains(&Capability::Start) || allow.contains(&Capability::Input))
+            && !allow.contains(&Capability::Sessions)
+        {
+            bail!("[[workspaces]] `{name}`: `start` and `input` need `sessions` in `allow` too");
+        }
         let ws_agents = match ws.agents {
             Some(list) => {
                 for agent in &list {
@@ -606,7 +617,8 @@ fn build_deny(extra: &[String]) -> Result<DenyRules> {
         .copied()
         .chain(extra.iter().map(String::as_str))
     {
-        let pattern = pattern.trim().trim_start_matches('/');
+        // `dir/` means the directory `dir`; ancestors are checked anyway.
+        let pattern = pattern.trim().trim_start_matches('/').trim_end_matches('/');
         if pattern.is_empty() {
             continue;
         }
@@ -738,6 +750,14 @@ mod tests {
     }
 
     #[test]
+    fn start_and_input_need_the_sessions_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = parse("allow = [\"files\", \"start\"]\n", dir.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("need `sessions`"), "{err:#}");
+        assert!(parse("allow = [\"sessions\", \"start\"]\n", dir.path()).is_ok());
+    }
+
+    #[test]
     fn unknown_keys_are_rejected() {
         let dir = tempfile::tempdir().unwrap();
         assert!(parse("[server]\nlisen = \"127.0.0.1:1\"\n", dir.path()).is_err());
@@ -790,6 +810,13 @@ mod tests {
         assert!(ws.is_denied(Path::new(".git/config")));
         assert!(ws.is_denied(Path::new("build/out.log")));
         assert!(!ws.is_denied(Path::new("src/build/out.log")));
+        // Directory patterns (with or without a trailing slash) cover their contents.
+        let cfg = parse("deny = [\"private/secrets\", \"vault/\"]\n", dir.path()).unwrap();
+        let ws = &cfg.workspaces[0];
+        assert!(ws.is_denied(Path::new("private/secrets")));
+        assert!(ws.is_denied(Path::new("private/secrets/passwords.txt")));
+        assert!(ws.is_denied(Path::new("vault/keys/a.txt")));
+        assert!(!ws.is_denied(Path::new("private/notes.txt")));
         assert!(!ws.is_denied(Path::new("src/main.rs")));
         assert!(!ws.is_denied(Path::new(".gitignore")));
     }

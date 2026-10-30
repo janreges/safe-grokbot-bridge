@@ -10,6 +10,7 @@ use crate::config::Agent;
 
 pub struct ProcInfo {
     pub pid: u32,
+    pub parent: Option<u32>,
     /// Unix time the process started.
     pub start_time: u64,
     pub name: String,
@@ -56,6 +57,7 @@ impl Snapshot {
                 pid,
                 ProcInfo {
                     pid,
+                    parent: process.parent().map(|p| p.as_u32()),
                     start_time: process.start_time(),
                     name: process.name().to_string_lossy().into_owned(),
                     cmd: process
@@ -160,6 +162,7 @@ mod tests {
     fn proc(name: &str, cmd: &[&str]) -> ProcInfo {
         ProcInfo {
             pid: 1,
+            parent: None,
             start_time: 0,
             name: name.into(),
             cmd: cmd.iter().map(|s| s.to_string()).collect(),

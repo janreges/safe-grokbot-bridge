@@ -105,7 +105,9 @@ pub async fn run(dir: &Path, request: GitRequest) -> Result<GitOutput, ApiError>
     };
     let (empty_note, narrow) = match &request {
         GitRequest::Status => {
-            args.extend(["status", "--short", "--branch"].map(String::from));
+            args.extend(
+                ["status", "--short", "--branch", "--ignore-submodules=all"].map(String::from),
+            );
             (
                 "",
                 "This endpoint has no narrowing options; inspect parts of the change with /v1/git/diff and `path`.",
@@ -131,6 +133,7 @@ pub async fn run(dir: &Path, request: GitRequest) -> Result<GitOutput, ApiError>
                     "diff",
                     "--no-ext-diff",
                     "--no-textconv",
+                    "--ignore-submodules=all",
                     "--stat",
                     "--patch",
                 ]
@@ -172,36 +175,9 @@ pub async fn run(dir: &Path, request: GitRequest) -> Result<GitOutput, ApiError>
     };
     args.extend(tail);
 
-    // Options that keep a repository's own config from running programs (fsmonitor, external
-    // diff drivers, textconv filters) or prompting; `--literal-pathspecs` disables pathspec magic.
-    let mut cmd = Command::new("git");
-    cmd.args([
-        "--no-pager",
-        "--literal-pathspecs",
-        "-c",
-        "core.fsmonitor=false",
-    ])
-    .args([
-        "-c",
-        "core.quotepath=off",
-        "-c",
-        "color.ui=never",
-        "-c",
-        "log.showSignature=false",
-    ])
-    .args(&args)
-    .current_dir(dir)
-    .env("GIT_OPTIONAL_LOCKS", "0")
-    .env("GIT_TERMINAL_PROMPT", "0")
-    .env("LC_ALL", "C");
     let command = format!("git {}", args.join(" "));
-    let out = exec::run(cmd, None, TIMEOUT, MAX_OUTPUT)
-        .await
-        .map_err(|err| {
-            ApiError::unavailable(format!(
-                "Could not run git: {err:#}. This affects every git endpoint on this machine; retrying will not help until git works there."
-            ))
-        })?;
+    let filters = filter_overrides(dir).await;
+    let out = git(dir, &filters, &args, MAX_OUTPUT).await?;
     if !out.success() {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -227,6 +203,79 @@ pub async fn run(dir: &Path, request: GitRequest) -> Result<GitOutput, ApiError>
         truncated: out.truncated,
         note,
     })
+}
+
+/// Runs git with options that keep a repository's own configuration from running programs or
+/// prompting: no fsmonitor, no pager, no signature verification, literal pathspecs, and (for the
+/// commands that use them) no external diff drivers, textconv or filters. `extra` comes first so
+/// it can override configuration.
+async fn git(
+    dir: &Path,
+    extra: &[String],
+    args: &[String],
+    max: usize,
+) -> Result<exec::Output, ApiError> {
+    let mut cmd = Command::new("git");
+    cmd.args(["--no-pager", "--literal-pathspecs"])
+        .args(["-c", "core.fsmonitor=false", "-c", "core.quotepath=off"])
+        .args(["-c", "color.ui=never", "-c", "log.showSignature=false"])
+        .args(extra)
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C");
+    exec::run(cmd, None, TIMEOUT, max).await.map_err(|err| {
+        ApiError::unavailable(format!(
+            "Could not run git: {err:#}. This affects every git endpoint on this machine; retrying will not help until git works there."
+        ))
+    })
+}
+
+/// `-c filter.<name>.{clean,smudge,process}=` for every filter driver the configuration defines.
+/// Git runs clean filters while comparing working-tree files (`status`, `diff`), so a driver in
+/// a repository's config would otherwise execute on a read-only request. Reading the
+/// configuration runs nothing.
+async fn filter_overrides(dir: &Path) -> Vec<String> {
+    let args = ["config", "--get-regexp", r"^filter\."].map(String::from);
+    let Ok(out) = git(dir, &[], &args, 256 * 1024).await else {
+        return Vec::new();
+    };
+    let mut names: Vec<&str> = out
+        .stdout
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter_map(|key| key.strip_prefix("filter."))
+        .filter_map(|rest| rest.rsplit_once('.').map(|(name, _)| name))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+        .into_iter()
+        .flat_map(|name| {
+            ["clean", "smudge", "process"]
+                .into_iter()
+                .flat_map(move |what| ["-c".to_string(), format!("filter.{name}.{what}=")])
+        })
+        .collect()
+}
+
+/// The root of the repository that contains `dir`, canonicalized.
+pub async fn toplevel(dir: &Path) -> Result<std::path::PathBuf, ApiError> {
+    let args = ["rev-parse", "--show-toplevel"].map(String::from);
+    let out = git(dir, &[], &args, 64 * 1024).await?;
+    if !out.success() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "git_failed",
+            format!(
+                "`{}` is not inside a git repository: {}",
+                dir.display(),
+                out.stderr.trim()
+            ),
+        ));
+    }
+    dunce::canonicalize(out.stdout.trim()).map_err(ApiError::internal)
 }
 
 #[cfg(test)]
@@ -305,6 +354,28 @@ mod tests {
         .await
         .unwrap();
         assert!(diff.output.contains("+hello world"));
+        // A clean filter from the repository's own config must not run on a read request.
+        let marker = dir.path().join("PWNED");
+        std::fs::write(dir.path().join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+        git(&[
+            "config",
+            "filter.evil.clean",
+            &format!("sh -c 'touch {}; cat'", marker.display()),
+        ]);
+        std::fs::write(dir.path().join("a.txt"), "changed again\n").unwrap();
+        run(dir.path(), GitRequest::Status).await.unwrap();
+        run(
+            dir.path(),
+            GitRequest::Diff {
+                rev: None,
+                staged: false,
+                path: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!marker.exists(), "a repository filter ran");
+
         let err = run(
             dir.path(),
             GitRequest::Show {

@@ -12,7 +12,7 @@ use common::{Harness, harness, script, toml_str};
 use serde_json::{Value, json};
 
 /// A stand-in for `claude -p --output-format stream-json`: answers `echo: <prompt>`, logs its
-/// arguments, fails on the prompt `fail` and hangs on `slow`.
+/// arguments, fails on the prompt `fail` and hangs (after writing its pid) on `slow`.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 if [ "$1" = "agents" ]; then echo '[]'; exit 0; fi
 echo "$@" >> "$ARGS_LOG"
@@ -26,26 +26,30 @@ if [ "$prompt" = "fail" ]; then
   echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","session_id":"'"$sid"'"}'
   exit 1
 fi
-if [ "$prompt" = "slow" ]; then sleep 30; fi
+if [ "$prompt" = "slow" ]; then echo $$ > "$ARGS_LOG.pid"; sleep 30; fi
 printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$sid"
 printf '{"type":"assistant","message":{"content":[{"type":"text","text":"working on %s"}]}}\n' "$prompt"
 printf '{"type":"result","subtype":"success","is_error":false,"result":"echo: %s","session_id":"%s"}\n' "$prompt" "$sid"
 "#;
 
-/// A bridge whose `claude` agent is [`FAKE_CLAUDE`]; returns the path of its argument log.
-async fn headless_harness() -> (Harness, PathBuf) {
-    let bin = tempfile::tempdir().unwrap().keep();
-    let claude = script(&bin, "claude", FAKE_CLAUDE);
-    let log = bin.join("args.log");
+struct Headless {
+    h: Harness,
+    log: PathBuf,
+    _bin: tempfile::TempDir,
+}
+
+/// A bridge whose `claude` agent is [`FAKE_CLAUDE`].
+async fn headless_harness() -> Headless {
+    let bin = tempfile::tempdir().unwrap();
+    let claude = script(bin.path(), "claude", FAKE_CLAUDE);
+    let log = bin.path().join("args.log");
     let extra = format!(
         "[sessions]\nrunner = \"headless\"\n[agents.claude]\ncommand = {}\nenv = {{ ARGS_LOG = {} }}\n",
         toml_str(&claude),
         toml_str(&log),
     );
-    (
-        harness("[\"files\", \"sessions\", \"input\", \"start\"]", &extra).await,
-        log,
-    )
+    let h = harness("[\"files\", \"sessions\", \"input\", \"start\"]", &extra).await;
+    Headless { h, log, _bin: bin }
 }
 
 async fn wait_idle(h: &Harness, id: &str) -> Value {
@@ -56,7 +60,7 @@ async fn wait_idle(h: &Harness, id: &str) -> Value {
 
 #[tokio::test]
 async fn headless_sessions_answer_and_continue_the_conversation() {
-    let (h, _) = headless_harness().await;
+    let Headless { h, log, _bin } = headless_harness().await;
     let (status, started) = h
         .post(
             "/v1/sessions",
@@ -83,12 +87,29 @@ async fn headless_sessions_answer_and_continue_the_conversation() {
     let done = wait_idle(&h, &id).await;
     assert_eq!(done["last_message"], "echo: again");
 
+    // Follow-up turns resume the agent's conversation.
+    let args = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<&str> = args.lines().collect();
+    assert!(
+        lines[0].contains(&format!("--session-id {session_id}")),
+        "{args}"
+    );
+    assert!(
+        lines[1].contains(&format!("--resume {session_id}")),
+        "{args}"
+    );
+    assert!(lines[0].contains("--permission-mode auto"), "{args}");
+
     let (_, _) = h
         .post(&format!("/v1/sessions/{id}/input"), json!({"text": "fail"}))
         .await;
     let failed = wait_idle(&h, &id).await;
     assert_eq!(failed["state"], "failed", "{failed}");
     assert_eq!(failed["error"], "boom");
+    assert!(
+        failed["last_message"].is_null(),
+        "a failed turn shows no stale answer"
+    );
 
     let (status, body) = h
         .post(
@@ -100,40 +121,32 @@ async fn headless_sessions_answer_and_continue_the_conversation() {
 }
 
 #[tokio::test]
-async fn headless_follow_up_turns_resume_the_agent_session() {
-    let (h, log) = headless_harness().await;
+async fn concurrent_messages_start_only_one_turn() {
+    let Headless { h, log, _bin } = headless_harness().await;
     let (_, started) = h
-        .post(
-            "/v1/sessions",
-            json!({"cwd": h.root, "agent": "claude", "prompt": "one"}),
-        )
+        .post("/v1/sessions", json!({"cwd": h.root, "agent": "claude"}))
         .await;
     let id = started["id"].as_str().unwrap().to_string();
-    let first = wait_idle(&h, &id).await;
-    let session_id = first["agent_session_id"].as_str().unwrap().to_string();
-    h.post(&format!("/v1/sessions/{id}/input"), json!({"text": "two"}))
-        .await;
+    let uri = format!("/v1/sessions/{id}/input");
+    let (a, b) = tokio::join!(
+        h.post(&uri, json!({"text": "one"})),
+        h.post(&uri, json!({"text": "two"}))
+    );
+    let mut statuses = [a.0, b.0];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::CONFLICT],
+        "{a:?} {b:?}"
+    );
     wait_idle(&h, &id).await;
-
-    let log = std::fs::read_to_string(log).unwrap();
-    let lines: Vec<&str> = log.lines().collect();
-    assert!(
-        lines[0].contains(&format!("--session-id {session_id}")),
-        "{log}"
-    );
-    assert!(
-        lines[1].contains(&format!("--resume {session_id}")),
-        "{log}"
-    );
-    assert!(
-        lines[0].contains("--permission-mode auto"),
-        "headless default permission mode: {log}"
-    );
+    let runs = std::fs::read_to_string(&log).unwrap().lines().count();
+    assert_eq!(runs, 1);
 }
 
 #[tokio::test]
 async fn keep_alive_false_finishes_after_the_first_answer_and_stop_kills_a_turn() {
-    let (h, _) = headless_harness().await;
+    let Headless { h, log, _bin } = headless_harness().await;
     let (_, started) = h
         .post(
             "/v1/sessions",
@@ -156,7 +169,17 @@ async fn keep_alive_false_finishes_after_the_first_answer_and_stop_kills_a_turn(
         )
         .await;
     let slow_id = slow["id"].as_str().unwrap().to_string();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let pid_file = PathBuf::from(format!("{}.pid", log.display()));
+    for _ in 0..50 {
+        if pid_file.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .to_string();
     let (_, running) = h.get(&format!("/v1/sessions/{slow_id}")).await;
     assert_eq!(running["state"], "working", "{running}");
     let (status, busy) = h
@@ -172,12 +195,27 @@ async fn keep_alive_false_finishes_after_the_first_answer_and_stop_kills_a_turn(
     let (status, stopped) = h.delete(&format!("/v1/sessions/{slow_id}")).await;
     assert_eq!(status, StatusCode::OK, "{stopped}");
     assert_eq!(stopped["state"], "exited");
+    // The agent process itself is gone, not just reported as stopped.
+    let alive = || {
+        std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    for _ in 0..50 {
+        if !alive() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!alive(), "the turn's process {pid} still runs");
 }
 
 #[tokio::test]
 async fn start_requests_are_checked_against_the_workspace() {
-    let (h, _) = headless_harness().await;
+    let Headless { h, .. } = headless_harness().await;
     let outside = h.dir.path().join("state");
+    std::fs::create_dir_all(&outside).unwrap();
     let cases = [
         (
             json!({"cwd": "/", "agent": "claude"}),
@@ -200,8 +238,12 @@ async fn start_requests_are_checked_against_the_workspace() {
             StatusCode::BAD_REQUEST,
         ),
         (
+            json!({"cwd": h.root, "agent": "claude", "resume": "11111111-2222-3333-4444-555555555555"}),
+            StatusCode::FORBIDDEN,
+        ),
+        (
             json!({"cwd": h.root, "agent": "claude", "unknown": 1}),
-            StatusCode::BAD_REQUEST,
+            StatusCode::UNPROCESSABLE_ENTITY,
         ),
     ];
     for (request, expected) in cases {
@@ -211,22 +253,27 @@ async fn start_requests_are_checked_against_the_workspace() {
 }
 
 fn tmux_available() -> bool {
-    std::process::Command::new("tmux")
+    let available = std::process::Command::new("tmux")
         .arg("-V")
         .output()
-        .is_ok_and(|o| o.status.success())
+        .is_ok_and(|o| o.status.success());
+    // CI sets this, so a missing tmux fails instead of silently skipping the test.
+    if !available && std::env::var_os("SGB_REQUIRE_TMUX").is_some() {
+        panic!("tmux is required (SGB_REQUIRE_TMUX is set) but not installed");
+    }
+    available
 }
 
 #[tokio::test]
-async fn tmux_sessions_take_text_and_keys() {
+async fn tmux_sessions_take_text_and_keys_and_ignore_other_panes() {
     if !tmux_available() {
         eprintln!("tmux not installed; skipping");
         return;
     }
     let socket = format!("sgb-test-{}", std::process::id());
-    let bin = tempfile::tempdir().unwrap().keep();
+    let bin = tempfile::tempdir().unwrap();
     let echo = script(
-        &bin,
+        bin.path(),
         "echo-agent",
         "#!/bin/sh\nwhile IFS= read -r line; do echo \"GOT:$line\"; done\n",
     );
@@ -235,6 +282,13 @@ async fn tmux_sessions_take_text_and_keys() {
         toml_str(&echo)
     );
     let h = harness("[\"sessions\", \"input\", \"start\"]", &extra).await;
+    let tmux = |args: &[&str]| {
+        std::process::Command::new("tmux")
+            .args(["-L", &socket])
+            .args(args)
+            .output()
+            .unwrap()
+    };
 
     let (status, started) = h
         .post("/v1/sessions", json!({"cwd": h.root, "agent": "echo"}))
@@ -243,6 +297,15 @@ async fn tmux_sessions_take_text_and_keys() {
     assert_eq!(started["runner"], "tmux");
     let id = started["id"].as_str().unwrap().to_string();
     assert!(started["attach_command"].as_str().unwrap().contains(&id));
+
+    // A shell someone opens next to the agent is neither listed nor typed into.
+    tmux(&[
+        "split-window",
+        "-t",
+        &format!("={id}:"),
+        "-c",
+        h.root.to_str().unwrap(),
+    ]);
 
     let (status, body) = h
         .post(
@@ -281,13 +344,56 @@ async fn tmux_sessions_take_text_and_keys() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     let (_, list) = h.get("/v1/sessions").await;
-    let listed = list["sessions"]
+    let ids: Vec<&str> = list["sessions"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|s| s["id"] == id.as_str())
-        .cloned();
-    assert_eq!(listed.unwrap()["started_by_bridge"], true);
+        .map(|s| s["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [id.as_str()], "{list}");
+
+    // An agent running inside an interactive shell pane is listed but not controllable.
+    tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        "byhand",
+        "-c",
+        h.root.to_str().unwrap(),
+    ]);
+    tmux(&[
+        "send-keys",
+        "-t",
+        "=byhand:",
+        &echo.display().to_string(),
+        "Enter",
+    ]);
+    let mut by_hand = Value::Null;
+    for _ in 0..30 {
+        let (_, list) = h.get("/v1/sessions").await;
+        if let Some(found) = list["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] != id.as_str())
+        {
+            by_hand = found.clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(by_hand["controllable"], false, "{by_hand}");
+    let other = by_hand["id"].as_str().unwrap();
+    let (status, body) = h
+        .post(
+            &format!("/v1/sessions/{other}/input"),
+            json!({"text": "ls"}),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (StatusCode::CONFLICT, Some("not_controllable"))
+    );
 
     let (status, stopped) = h.delete(&format!("/v1/sessions/{id}")).await;
     assert_eq!(status, StatusCode::OK, "{stopped}");
@@ -298,9 +404,7 @@ async fn tmux_sessions_take_text_and_keys() {
             .unwrap_or_default()
             .contains("GOT:hello world")
     );
-    let _ = std::process::Command::new("tmux")
-        .args(["-L", &socket, "kill-server"])
-        .output();
+    let _ = tmux(&["kill-server"]);
     // SAFETY: getuid has no preconditions.
     let uid = unsafe { libc::getuid() };
     let tmpdir = std::env::var("TMUX_TMPDIR").unwrap_or_else(|_| "/tmp".into());

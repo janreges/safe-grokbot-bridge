@@ -5,7 +5,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use crate::agents::{self, Launch, StreamEvent};
@@ -15,15 +15,18 @@ use crate::sessions::{Phase, Record};
 use crate::tmux::scrub_env;
 
 const STDERR_TAIL: usize = 8 * 1024;
+/// Longest stream line kept (a Claude/Codex event, or a Hermes output line).
+const MAX_LINE: usize = 4 * 1024 * 1024;
+/// Longest answer kept in memory.
+const MAX_MESSAGE: usize = 256 * 1024;
+/// Plain (Hermes) output kept for parsing.
+const MAX_PLAIN: usize = 4 * 1024 * 1024;
+/// After the agent exits, how long its pipes may stay open (held by a leftover descendant).
+const DRAIN: Duration = Duration::from_secs(5);
 
-/// Starts one turn in the background. The caller has checked that no turn is running.
+/// Runs one turn in the background. The caller has already moved the record to
+/// `Phase::Working` (under its lock), so concurrent requests cannot start a second turn.
 pub fn spawn_turn(record: Arc<Record>, launch: Launch, prompt: String, max_secs: u64) {
-    {
-        let mut state = record.state();
-        state.phase = Phase::Working;
-        state.error = None;
-        state.last_input_at = Some(crate::hook::unix_now());
-    }
     tokio::spawn(async move {
         let result = run_turn(&record, &launch, &prompt, max_secs).await;
         let mut state = record.state();
@@ -57,7 +60,7 @@ async fn run_turn(
         .map_err(|e| e.message)?;
     let program = exec::which(&argv[0]).ok_or_else(|| {
         format!(
-            "`{}` was not found on the bridge's PATH. Set an absolute `command` for agent `{}`.",
+            "`{}` was not found on the bridge's PATH. Only the machine's owner can install it or set an absolute `command` for agent `{}`.",
             argv[0], agent.name
         )
     })?;
@@ -77,7 +80,19 @@ async fn run_turn(
         .spawn()
         .map_err(|err| format!("Cannot start `{}`: {err}", argv[0]))?;
     let pid = child.id();
-    record.state().child_pid = pid;
+    {
+        // Publish the pid and check, under one lock, that the turn was not stopped while the
+        // process was being started; `stop` can only kill a process it can see.
+        let mut state = record.state();
+        if state.phase != Phase::Working {
+            drop(state);
+            if let Some(pid) = pid {
+                kill_tree(pid);
+            }
+            return Err("The turn was stopped.".into());
+        }
+        state.child_pid = pid;
+    }
 
     if let Some(mut stdin) = child.stdin.take() {
         let prompt = prompt.to_string();
@@ -92,27 +107,38 @@ async fn run_turn(
             .map(|(bytes, _)| tail(&bytes))
             .unwrap_or_default()
     });
-    let mut lines = BufReader::new(child.stdout.take().expect("stdout is piped")).lines();
+    // Lines are read in their own task and passed over a channel: receiving is cancel-safe, so
+    // no partly read line is lost when the exit status arrives first.
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout is piped"));
+    let (lines_tx, mut lines) = tokio::sync::mpsc::channel::<String>(64);
+    let reader = tokio::spawn(async move {
+        let mut line = Vec::new();
+        while let Ok(true) = read_line(&mut stdout, &mut line).await {
+            if lines_tx
+                .send(String::from_utf8_lossy(&line).into_owned())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
 
     let mut outcome: Option<Result<(), String>> = None;
-    let mut plain_output = String::new();
-    let work = async {
-        while let Ok(Some(line)) = lines.next_line().await {
-            let events = match agent.kind {
-                AgentKind::Claude => agents::parse_claude_line(&line),
-                AgentKind::Codex => agents::parse_codex_line(&line),
-                _ => {
-                    plain_output.push_str(&line);
-                    plain_output.push('\n');
-                    continue;
-                }
+    let mut plain = String::new();
+    let mut handle = |line: &str| match agent.kind {
+        AgentKind::Claude | AgentKind::Codex => {
+            let events = if agent.kind == AgentKind::Claude {
+                agents::parse_claude_line(line)
+            } else {
+                agents::parse_codex_line(line)
             };
             let mut state = record.state();
             for event in events {
                 match event {
                     StreamEvent::SessionId(id) => state.agent_session_id = Some(id),
                     StreamEvent::Message(text) => {
-                        state.last_message = Some(text);
+                        state.last_message = Some(truncate(text, MAX_MESSAGE));
                         state.last_message_at = Some(SystemTime::now());
                     }
                     StreamEvent::Done => outcome = Some(Ok(())),
@@ -120,44 +146,126 @@ async fn run_turn(
                 }
             }
         }
-        child.wait().await
+        _ => {
+            if plain.len() < MAX_PLAIN {
+                plain.push_str(line);
+                plain.push('\n');
+            }
+        }
     };
-    let status = match tokio::time::timeout(Duration::from_secs(max_secs), work).await {
+    let turn = async {
+        let mut open = true;
+        let status = loop {
+            tokio::select! {
+                line = lines.recv(), if open => match line {
+                    Some(line) => handle(&line),
+                    None => open = false,
+                },
+                exited = child.wait() => break exited,
+            }
+        };
+        // The output may still be in flight, or a descendant that escaped the process group may
+        // keep stdout open: take what arrives within a short grace period.
+        if open {
+            let drain = async {
+                while let Some(line) = lines.recv().await {
+                    handle(&line);
+                }
+            };
+            let _ = tokio::time::timeout(DRAIN, drain).await;
+        }
+        status
+    };
+    let finished = tokio::time::timeout(Duration::from_secs(max_secs), turn).await;
+    reader.abort();
+    let status = match finished {
         Ok(status) => status.map_err(|err| format!("Waiting for the agent failed: {err}"))?,
         Err(_) => {
             if let Some(pid) = pid {
                 kill_tree(pid);
             }
+            stderr_task.abort();
             return Err(format!(
                 "The turn did not finish within {max_secs} s and was stopped."
             ));
         }
     };
-    let stderr = stderr_task.await.unwrap_or_default();
+    let stderr = match tokio::time::timeout(DRAIN, stderr_task).await {
+        Ok(Ok(text)) => text,
+        _ => String::new(),
+    };
 
     if agent.kind == AgentKind::Hermes {
-        let (session_id, answer) = agents::parse_hermes_output(&plain_output, &stderr);
+        let (session_id, answer) = agents::parse_hermes_output(&plain, &stderr);
         let mut state = record.state();
         if session_id.is_some() {
             state.agent_session_id = session_id;
         }
         if !answer.is_empty() {
-            state.last_message = Some(answer);
+            state.last_message = Some(truncate(answer, MAX_MESSAGE));
             state.last_message_at = Some(SystemTime::now());
         }
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(failure(&argv[0], &status, &stderr))
+        };
     }
     match outcome {
         Some(result) => result,
-        None if status.success() => Ok(()),
-        None => Err(format!(
-            "`{}` exited with {status}: {}",
+        // Claude and Codex end every turn with a result event; exiting without one is a failure
+        // even with exit code 0.
+        None if status.success() => Err(format!(
+            "`{}` exited without reporting a result. {}",
             argv[0],
             if stderr.trim().is_empty() {
-                "no error output"
+                "It printed no error."
             } else {
                 stderr.trim()
             }
         )),
+        None => Err(failure(&argv[0], &status, &stderr)),
+    }
+}
+
+fn failure(program: &str, status: &std::process::ExitStatus, stderr: &str) -> String {
+    format!(
+        "`{program}` exited with {status}: {}",
+        if stderr.trim().is_empty() {
+            "no error output"
+        } else {
+            stderr.trim()
+        }
+    )
+}
+
+/// Reads one line into `buf` (without the newline), keeping at most `MAX_LINE` bytes of it.
+/// Returns `false` at the end of the stream.
+async fn read_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> std::io::Result<bool> {
+    buf.clear();
+    let mut seen = false;
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            return Ok(seen);
+        }
+        seen = true;
+        let (take, done) = match chunk.iter().position(|b| *b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        let keep = take.min(MAX_LINE.saturating_sub(buf.len()));
+        buf.extend_from_slice(&chunk[..keep]);
+        reader.consume(take);
+        if done {
+            if buf.last() == Some(&b'\n') {
+                buf.pop();
+            }
+            return Ok(true);
+        }
     }
 }
 
@@ -166,31 +274,71 @@ fn tail(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[start..]).into_owned()
 }
 
-/// Stops a turn's process group (Unix) or process tree (Windows).
+fn truncate(mut text: String, max: usize) -> String {
+    if text.len() > max {
+        let mut end = max;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str("\n[… truncated]");
+    }
+    text
+}
+
+/// Stops a turn's process group (Unix) or process tree (Windows) in the background.
 pub fn kill_tree(pid: u32) {
+    tokio::spawn(terminate_tree(pid));
+}
+
+/// Asks a turn's processes to stop, and kills them if they are still there after 3 s.
+pub async fn terminate_tree(pid: u32) {
     #[cfg(unix)]
     {
         let pgid = pid as libc::pid_t;
-        // SAFETY: killpg only sends a signal; an outdated pid fails harmlessly with ESRCH.
+        // SAFETY: killpg only sends a signal; signal 0 just checks whether the group exists.
+        // An outdated pid fails harmlessly with ESRCH.
         unsafe {
             libc::killpg(pgid, libc::SIGTERM);
         }
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            // SAFETY: as above; signal 0 only checks whether the group still exists.
-            unsafe {
-                if libc::killpg(pgid, 0) == 0 {
-                    libc::killpg(pgid, libc::SIGKILL);
-                }
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            // SAFETY: as above.
+            if unsafe { libc::killpg(pgid, 0) } != 0 {
+                return;
             }
-        });
+        }
+        // SAFETY: as above.
+        unsafe {
+            libc::killpg(pgid, libc::SIGKILL);
+        }
     }
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("taskkill")
+        let _ = Command::new("taskkill")
             .args(["/T", "/F", "/PID", &pid.to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status();
+            .status()
+            .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn long_lines_are_capped_and_lines_split() {
+        let data = format!("short\n{}\nlast", "x".repeat(MAX_LINE + 10));
+        let mut reader = BufReader::new(data.as_bytes());
+        let mut line = Vec::new();
+        assert!(read_line(&mut reader, &mut line).await.unwrap());
+        assert_eq!(line, b"short");
+        assert!(read_line(&mut reader, &mut line).await.unwrap());
+        assert_eq!(line.len(), MAX_LINE);
+        assert!(read_line(&mut reader, &mut line).await.unwrap());
+        assert_eq!(line, b"last");
+        assert!(!read_line(&mut reader, &mut line).await.unwrap());
     }
 }

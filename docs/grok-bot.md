@@ -128,7 +128,12 @@ sgb pc1 POST /v1/sessions /tmp/start.json
   - `tmux` (default) for work I may want to watch or continue myself;
   - `headless` for quick questions;
   - `keep_alive: false` for one-off tasks: the session closes after its answer, and
-    `last_message` stays readable.
+    `last_message` stays readable. In tmux this works for Claude Code and Codex; for other
+    agents use `headless`.
+- **Sessions you cannot type into** have `controllable: false` and a `note` saying why. Do not
+  look for workarounds; start a new session in that folder if you need one, or ask me.
+- **Resume only where the conversation happened:** `resume` works only with the same `cwd` the
+  conversation was held in.
 - **Bypass only when asked.** Use `bypass_permissions: true` only when I asked for it, or when the
   workspace is clearly meant for it. Otherwise answer permission prompts deliberately.
 - **Do not stop what you did not start.** Stop sessions you started with `DELETE` when they are

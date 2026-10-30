@@ -12,10 +12,12 @@ All notable changes to this project are documented in this file. The format is b
 - Bearer-token authentication with hashed tokens, per-IP lockout after failed attempts and
   per-token rate limits.
 - Plain HTTP on loopback for tunnels and reverse proxies. On public addresses, TLS with an
-  automatically generated, pinned self-signed certificate, or a certificate you provide.
+  automatically generated, pinned self-signed certificate, or a certificate you provide, with
+  handshake, first-request and idle timeouts and per-address connection limits.
 - Workspaces with per-folder capabilities (`files`, `git`, `sessions`, `input`, `start`), deny
   patterns for secrets, and an "any folder" mode for dedicated machines.
-- Read-only file listing and reading, and `git status`, `log`, `diff` and `show`.
+- Read-only file listing (paged) and reading, and `git status`, `log`, `diff` and `show`,
+  authorized per repository and run without repository-configured programs.
 - Agent sessions for Claude Code, Codex CLI and Hermes Agent, plus generic terminal programs:
   - in tmux, as live terminals a person can attach to, with turn-complete hooks;
   - headless, as one non-interactive run per message;

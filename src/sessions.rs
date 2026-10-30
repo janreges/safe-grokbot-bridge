@@ -38,8 +38,6 @@ const FINAL_SCREEN_LINES: usize = 500;
 const ACTIVE_SECS: u64 = 3;
 /// A tracked turn without output for this long is probably waiting for the user.
 const WAITING_SECS: u64 = 15;
-/// Agents without turn tracking are considered done after this much silence.
-const HEURISTIC_DONE_SECS: u64 = 20;
 const CLAUDE_CACHE: Duration = Duration::from_secs(2);
 /// How long finished, exited and stopped sessions stay listed.
 const RETENTION: Duration = Duration::from_secs(3600);
@@ -117,7 +115,8 @@ pub struct Session {
     /// Last terminal output (tmux sessions), RFC 3339.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<String>,
-    /// The agent's last completed answer; while a headless turn runs, its latest message.
+    /// The agent's last answer. A headless session clears it when a new message is sent and
+    /// shows the newest progress message while the turn runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,7 +166,8 @@ pub struct StartRequest {
     pub runner: Option<RunnerChoice>,
     /// First message to the agent.
     pub prompt: Option<String>,
-    /// Model, passed with the agent's model flag (e.g. `opus`, `gpt-6.1-sol`).
+    /// Model, passed with the agent's model flag (e.g. `opus`, `gpt-6.1-sol`). Replaces a model
+    /// set in the agent's configured `args`.
     pub model: Option<String>,
     pub effort: Option<Effort>,
     /// Run without permission prompts (e.g. `--dangerously-skip-permissions`). Needs
@@ -175,9 +175,11 @@ pub struct StartRequest {
     #[serde(default)]
     pub bypass_permissions: bool,
     /// `true` (default) keeps the session after it answers. `false` closes it once the first
-    /// answer is in; the answer stays readable in `last_message`.
+    /// answer is in; the answer stays readable in `last_message`. In tmux this needs an agent
+    /// that reports finished turns (Claude Code, Codex).
     pub keep_alive: Option<bool>,
-    /// Continue an earlier conversation: the agent's session id (`agent_session_id`).
+    /// Continue an earlier conversation held in this same folder: the agent's session id
+    /// (`agent_session_id`).
     pub resume: Option<String>,
 }
 
@@ -205,6 +207,8 @@ pub enum Phase {
     /// Live tmux session, or headless session waiting for a message.
     #[default]
     Idle,
+    /// The tmux session is being created.
+    Starting,
     /// A headless turn is running.
     Working,
     /// The last headless turn failed.
@@ -233,6 +237,8 @@ pub struct Record {
 #[derive(Default)]
 pub struct RecordState {
     pub phase: Phase,
+    /// The tmux pane the agent runs in; other panes someone opens in the session are ignored.
+    pub pane: Option<String>,
     pub agent_session_id: Option<String>,
     pub last_message: Option<String>,
     pub last_message_at: Option<SystemTime>,
@@ -261,8 +267,7 @@ impl Record {
     }
 
     /// Launch options for the next headless turn: continue the conversation once it exists.
-    fn next_launch(&self) -> Launch {
-        let state = self.state();
+    fn launch_for(&self, state: &RecordState) -> Launch {
         let mut launch = self.launch.clone();
         if state.turns > 0
             && let Some(id) = &state.agent_session_id
@@ -276,30 +281,57 @@ impl Record {
     fn live(&self) -> bool {
         !matches!(self.state().phase, Phase::Finished | Phase::Exited)
     }
+
+    /// tmux target of the agent's pane.
+    fn target(&self) -> String {
+        self.state()
+            .pane
+            .clone()
+            .unwrap_or_else(|| tmux::session_target(&self.id))
+    }
+}
+
+/// What a tmux session needs to survive a restart of the bridge, kept in the state directory.
+#[derive(Serialize, Deserialize)]
+struct RecordMeta {
+    #[serde(default = "yes")]
+    keep_alive: bool,
+    #[serde(default)]
+    last_input_at: Option<u64>,
+    #[serde(default)]
+    sent: Vec<String>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------------------------
 
+/// Sessions reported by `claude agents --json` for every Claude profile, and the profiles whose
+/// query failed.
+type ClaudeList = Arc<(Vec<ClaudeAgent>, Vec<String>)>;
+
 pub struct Sessions {
     config: Arc<Config>,
     pub tmux: Option<Tmux>,
     pub tmux_version: Option<String>,
     events_dir: PathBuf,
+    meta_dir: PathBuf,
     exe: PathBuf,
     records: Mutex<HashMap<String, Arc<Record>>>,
     claude_cache: tokio::sync::Mutex<Option<(Instant, ClaudeList)>>,
 }
 
-/// `claude agents --json`, or why it is unavailable.
-type ClaudeList = Arc<Result<Vec<ClaudeAgent>, String>>;
-
 /// What a listing is built from.
 struct Context {
     panes: Vec<Pane>,
+    /// The pane list is reliable; when false, missing panes say nothing about their sessions.
+    tmux_ok: bool,
     snapshot: Snapshot,
-    claude: Arc<Vec<ClaudeAgent>>,
+    claude: Vec<ClaudeAgent>,
     now: u64,
     /// Sources that failed; sessions from them are missing.
     problems: Vec<String>,
@@ -322,6 +354,7 @@ impl Sessions {
             tmux: tmux_version.is_some().then_some(tmux),
             tmux_version,
             events_dir: config.server.state_dir.join("events"),
+            meta_dir: config.server.state_dir.join("sessions"),
             exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("safe-grokbot-bridge")),
             records: Mutex::new(HashMap::new()),
             claude_cache: tokio::sync::Mutex::new(None),
@@ -347,6 +380,8 @@ impl Sessions {
         self.config.workspaces.iter().find(|ws| ws.name == name)
     }
 
+    /// `claude agents --json` of every configured Claude profile (distinct config directory),
+    /// cached for a moment because listings run it on every request.
     async fn claude_agents(&self) -> ClaudeList {
         let mut cache = self.claude_cache.lock().await;
         if let Some((at, list)) = cache.as_ref()
@@ -354,47 +389,66 @@ impl Sessions {
         {
             return list.clone();
         }
-        let agent = self
+        let mut found: Vec<ClaudeAgent> = Vec::new();
+        let mut errors = Vec::new();
+        let mut dirs = Vec::new();
+        let profiles = self
             .config
             .agents
             .iter()
-            .find(|a| a.kind == AgentKind::Claude && exec::which(&a.command).is_some());
-        let list = Arc::new(match agent {
-            Some(agent) => external::claude_agents(agent).await,
-            None => Ok(Vec::new()),
-        });
+            .filter(|a| a.kind == AgentKind::Claude && exec::which(&a.command).is_some());
+        for agent in profiles {
+            let dir = external::claude_dir(agent);
+            if dirs.contains(&dir) {
+                continue;
+            }
+            dirs.push(dir);
+            match external::claude_agents(agent).await {
+                Ok(list) => {
+                    for entry in list {
+                        let duplicate = entry.session_id.is_some()
+                            && found.iter().any(|e| e.session_id == entry.session_id);
+                        if !duplicate {
+                            found.push(entry);
+                        }
+                    }
+                }
+                Err(err) => errors.push(format!(
+                    "`claude agents --json` for agent `{}` failed ({err}); its Claude Code sessions outside tmux are missing and their states are estimated from terminal activity.",
+                    agent.name
+                )),
+            }
+        }
+        let list = Arc::new((found, errors));
         *cache = Some((Instant::now(), list.clone()));
         list
     }
 
     async fn context(&self) -> Context {
         let mut problems = Vec::new();
-        let panes = match &self.tmux {
-            Some(tmux) => tmux.list_panes().await.unwrap_or_else(|err| {
-                problems.push(format!(
-                    "tmux could not be queried ({err:#}); tmux sessions are missing from this list."
-                ));
-                Vec::new()
-            }),
-            None => Vec::new(),
+        let (panes, tmux_ok) = match &self.tmux {
+            Some(tmux) => match tmux.list_panes().await {
+                Ok(panes) => (panes, true),
+                Err(err) => {
+                    problems.push(format!(
+                        "tmux could not be queried ({err:#}); tmux sessions are missing from this list."
+                    ));
+                    (Vec::new(), false)
+                }
+            },
+            None => (Vec::new(), true),
         };
         let with_environ = self.config.experimental.external_sessions;
         let snapshot = tokio::task::spawn_blocking(move || Snapshot::take(with_environ))
             .await
             .unwrap_or_default();
-        let claude = match self.claude_agents().await.as_ref() {
-            Ok(list) => Arc::new(list.clone()),
-            Err(err) => {
-                problems.push(format!(
-                    "`claude agents --json` failed ({err}); Claude Code sessions outside tmux are missing and Claude states are estimated from terminal activity."
-                ));
-                Arc::new(Vec::new())
-            }
-        };
+        let claude = self.claude_agents().await;
+        problems.extend(claude.1.iter().cloned());
         Context {
             panes,
+            tmux_ok,
             snapshot,
-            claude,
+            claude: claude.0.clone(),
             now: unix_now(),
             problems,
         }
@@ -403,13 +457,16 @@ impl Sessions {
     /// Drops ended sessions after the retention period.
     fn cleanup(&self) {
         let mut records = lock(&self.records);
-        records.retain(|_, record| {
+        records.retain(|id, record| {
             let expired = record
                 .state()
                 .ended_at
                 .is_some_and(|at| at.elapsed().unwrap_or_default() > RETENTION);
-            if expired && let Some(events) = &record.events {
-                let _ = std::fs::remove_file(events);
+            if expired {
+                if let Some(events) = &record.events {
+                    let _ = std::fs::remove_file(events);
+                }
+                let _ = std::fs::remove_file(self.meta_dir.join(format!("{id}.json")));
             }
             !expired
         });
@@ -417,7 +474,7 @@ impl Sessions {
 
     /// All sessions in workspaces with the `sessions` capability, optionally only those whose
     /// working directory is under `under`, and the sources that could not be queried.
-    pub async fn list(&self, under: Option<&Path>) -> (Vec<Session>, Vec<String>) {
+    pub async fn list(self: &Arc<Self>, under: Option<&Path>) -> (Vec<Session>, Vec<String>) {
         self.cleanup();
         let context = self.context().await;
         let mut sessions = self.collect(&context);
@@ -427,11 +484,11 @@ impl Sessions {
         (sessions, context.problems)
     }
 
-    fn collect(&self, ctx: &Context) -> Vec<Session> {
+    fn collect(self: &Arc<Self>, ctx: &Context) -> Vec<Session> {
         let records: Vec<Arc<Record>> = lock(&self.records).values().cloned().collect();
         let mut sessions = Vec::new();
         let mut in_tmux: HashSet<u32> = HashSet::new();
-        let mut live: HashSet<String> = HashSet::new();
+        let mut observed: HashSet<String> = HashSet::new();
         for pane in &ctx.panes {
             in_tmux.extend(ctx.snapshot.tree(pane.pid, 8).iter().map(|p| p.pid));
             in_tmux.insert(pane.pid);
@@ -439,27 +496,48 @@ impl Sessions {
                 .iter()
                 .find(|r| r.runner == Runner::Tmux && r.id == pane.session)
                 .cloned()
-                .or_else(|| self.adopt(pane));
-            if let Some(record) = &record {
-                if !record.live() {
-                    continue;
+                .or_else(|| self.adopt(pane, ctx));
+            match &record {
+                Some(record) => {
+                    if !record.live() || observed.contains(&record.id) {
+                        continue;
+                    }
+                    let mut state = record.state();
+                    match &state.pane {
+                        // Another pane someone opened in the bridge's session: not the agent.
+                        Some(agent_pane) if *agent_pane != pane.id => continue,
+                        Some(_) => {}
+                        None => {
+                            let agent = std::slice::from_ref(&record.agent);
+                            if ctx.snapshot.find_agent(pane.pid, agent).is_none() {
+                                continue;
+                            }
+                            state.pane = Some(pane.id.clone());
+                        }
+                    }
+                    drop(state);
+                    observed.insert(record.id.clone());
                 }
-                live.insert(record.id.clone());
+                // With psmux, pane ids are not unique across sessions; only sessions the bridge
+                // started are supported there.
+                None if cfg!(windows) => continue,
+                None => {}
             }
             sessions.extend(self.tmux_view(ctx, pane, record.as_ref()));
         }
         for record in &records {
-            if record.runner == Runner::Tmux && !live.contains(&record.id) {
+            if observed.contains(&record.id) {
+                continue;
+            }
+            if record.runner == Runner::Tmux && ctx.tmux_ok {
                 let mut state = record.state();
                 if state.phase == Phase::Idle {
-                    // The tmux session disappeared (the agent exited or someone killed it).
+                    // The agent's pane is gone (the agent exited or someone closed it).
                     state.phase = Phase::Exited;
                     state.ended_at = Some(SystemTime::now());
                 }
             }
-            if record.runner == Runner::Headless || !live.contains(&record.id) {
-                sessions.extend(self.record_view(record));
-            }
+            sessions.extend(self.record_view(record, ctx.tmux_ok));
         }
         sessions.extend(self.claude_views(ctx, &in_tmux));
         if self.config.experimental.external_sessions {
@@ -468,9 +546,9 @@ impl Sessions {
         sessions
     }
 
-    /// Takes over a bridge-named tmux session (`sgb-<dir>-<agent>-<hex>`) that has no record:
-    /// one started before a restart of the bridge, or with `safe-grokbot-bridge launch`.
-    fn adopt(&self, pane: &Pane) -> Option<Arc<Record>> {
+    /// Takes over a bridge-named tmux session (`sgb-<dir>-<agent>-<hex>`) without a record: one
+    /// started before a restart of the bridge, or with `safe-grokbot-bridge launch`.
+    fn adopt(self: &Arc<Self>, pane: &Pane, ctx: &Context) -> Option<Arc<Record>> {
         let rest = pane.session.strip_prefix("sgb-")?;
         let (prefix, suffix) = rest.rsplit_once('-')?;
         if suffix.len() != 6 || !suffix.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -482,8 +560,12 @@ impl Sessions {
             .iter()
             .filter(|a| prefix.ends_with(&format!("-{}", a.name)))
             .max_by_key(|a| a.name.len())?;
+        // Take the pane the agent runs in, not a shell someone opened next to it.
+        ctx.snapshot
+            .find_agent(pane.pid, std::slice::from_ref(agent))?;
         let cwd = dunce::canonicalize(&pane.cwd).ok()?;
         let workspace = paths::workspace_for(&self.config, &cwd)?;
+        let meta = self.load_meta(&pane.session);
         let events = matches!(agent.kind, AgentKind::Claude | AgentKind::Codex)
             .then(|| self.events_dir.join(format!("{}.jsonl", pane.session)));
         let record = Arc::new(Record {
@@ -492,13 +574,24 @@ impl Sessions {
             runner: Runner::Tmux,
             cwd,
             workspace: workspace.name.clone(),
-            keep_alive: true,
+            keep_alive: meta.keep_alive,
             launch: Launch::default(),
             started_at: unix_time(pane.created),
             events,
-            state: Mutex::new(RecordState::default()),
+            state: Mutex::new(RecordState {
+                pane: Some(pane.id.clone()),
+                last_input_at: meta.last_input_at,
+                sent: meta.sent,
+                ..RecordState::default()
+            }),
         });
-        lock(&self.records).insert(record.id.clone(), record.clone());
+        let record = lock(&self.records)
+            .entry(record.id.clone())
+            .or_insert(record)
+            .clone();
+        if !record.keep_alive {
+            self.watch_until_answered(record.id.clone());
+        }
         Some(record)
     }
 
@@ -549,13 +642,15 @@ impl Sessions {
             &cwd,
             &workspace,
         );
-        session.controllable = ws.allows(Capability::Input) && !pane.dead;
+        // Typing into a pane is safe only when nothing but the agent can receive the text: the
+        // bridge's own panes run the agent directly, and so do panes created with an explicit
+        // command. In a pane running an interactive shell, text sent after the agent exits
+        // would reach the shell.
+        let owned = record.is_some() || pane.owned_by_program();
+        session.controllable = ws.allows(Capability::Input) && !pane.dead && owned;
         session.last_activity_at = (pane.activity > 0).then(|| rfc3339(unix_time(pane.activity)));
         session.attach_command = self.tmux.as_ref().map(|t| t.attach_command(&pane.session));
-        session.target = Some(match record {
-            Some(record) => tmux::session_target(&record.id),
-            None => pane.id.clone(),
-        });
+        session.target = Some(pane.id.clone());
         session.agent_session_id = claude.and_then(|c| c.session_id.clone());
         session.started_at = (pane.created > 0).then(|| rfc3339(unix_time(pane.created)));
 
@@ -589,16 +684,24 @@ impl Sessions {
             }
             None => (None, None),
         };
-        let (state, waiting_for) = tmux_state(agent.kind, pane, claude, input_at, turn_at, ctx.now);
-        session.state = state;
-        session.waiting_for = waiting_for;
-        if state == SessionState::Waiting {
-            session.note = Some("The agent is waiting for an answer. Read `screen`, then reply with `text` or `keys` (e.g. [\"Enter\"] or [\"1\"]).".into());
+        let derived = tmux_state(agent.kind, pane, claude, input_at, turn_at, ctx.now);
+        session.state = derived.state;
+        session.waiting_for = derived.waiting_for;
+        let mut notes = Vec::new();
+        if !owned {
+            notes.push("This pane runs an interactive shell with the agent inside, so the bridge does not type into it (after the agent exits, text would reach the shell). Agents started with `safe-grokbot-bridge launch`, or as a pane's own command, can take input.");
         }
+        if derived.state == SessionState::Waiting {
+            notes.push("The agent is waiting for an answer. Read `screen`, then reply with `text` or `keys` (e.g. [\"Enter\"] or [\"1\"]).");
+        }
+        if derived.estimated {
+            notes.push("The state is estimated from terminal activity: a quiet agent may still be working. Check `screen`.");
+        }
+        session.note = (!notes.is_empty()).then(|| notes.join(" "));
         Some(session)
     }
 
-    fn record_view(&self, record: &Record) -> Option<Session> {
+    fn record_view(&self, record: &Record, tmux_ok: bool) -> Option<Session> {
         let ws = self.workspace(&record.workspace)?;
         if !ws.allows(Capability::Sessions) {
             return None;
@@ -612,8 +715,10 @@ impl Sessions {
             &record.workspace,
         );
         session.state = match state.phase {
+            // A tmux session that was not observed because tmux could not be queried.
+            Phase::Idle if record.runner == Runner::Tmux => SessionState::Unknown,
             Phase::Idle => SessionState::Idle,
-            Phase::Working => SessionState::Working,
+            Phase::Starting | Phase::Working => SessionState::Working,
             Phase::Failed => SessionState::Failed,
             Phase::Finished => SessionState::Finished,
             Phase::Exited => SessionState::Exited,
@@ -633,27 +738,24 @@ impl Sessions {
             .agent_session_id
             .as_ref()
             .and_then(|id| resume_command(&record.agent, id));
-        if state.phase == Phase::Finished {
-            session.note = Some("Finished (keep_alive: false). To continue this conversation, start a new session with `resume` set to `agent_session_id`.".into());
-        }
+        session.note = match state.phase {
+            Phase::Finished => Some("Finished (keep_alive: false). To continue this conversation, start a new session in the same folder with `resume` set to `agent_session_id`.".into()),
+            Phase::Idle if record.runner == Runner::Tmux && !tmux_ok => Some("tmux could not be queried, so the state of this session is unknown; see `warnings` in the session list.".into()),
+            _ => None,
+        };
         Some(session)
     }
 
     fn claude_views(&self, ctx: &Context, in_tmux: &HashSet<u32>) -> Vec<Session> {
         let experimental = self.config.experimental.external_sessions;
-        let agent = self
-            .config
-            .agents
-            .iter()
-            .find(|a| a.kind == AgentKind::Claude);
-        let (Some(agent), claude_dir) = (agent, agent.and_then(external::claude_dir)) else {
-            return Vec::new();
-        };
         let mut sessions = Vec::new();
-        for claude in ctx.claude.iter() {
+        for claude in &ctx.claude {
             if claude.pid.is_some_and(|pid| in_tmux.contains(&pid)) {
                 continue;
             }
+            let Some(agent) = self.config.agent(&claude.agent) else {
+                continue;
+            };
             let Some(session_id) = &claude.session_id else {
                 continue;
             };
@@ -666,6 +768,7 @@ impl Sessions {
             if !ws.allows(Capability::Sessions) {
                 continue;
             }
+            let claude_dir = external::claude_dir(agent);
             let mut session = Session::new(
                 format!("claude-{session_id}"),
                 agent,
@@ -682,14 +785,12 @@ impl Sessions {
                 .started_at
                 .map(|ms| rfc3339(UNIX_EPOCH + Duration::from_millis(ms)));
             session.pid = claude.pid;
-            session.attach_command = Some(if claude.kind == "background" {
-                format!("claude attach {}", &session_id[..session_id.len().min(8)])
-            } else {
-                format!(
-                    "cd {} && claude --resume {session_id}  (after closing the running session)",
-                    cwd.display()
-                )
-            });
+            if claude.kind == "background" {
+                session.attach_command = Some(format!(
+                    "claude attach {}",
+                    &session_id[..session_id.len().min(8)]
+                ));
+            }
             let inbox = claude
                 .pid
                 .zip(claude_dir.as_deref())
@@ -745,9 +846,9 @@ impl Sessions {
                 &ws.name,
             );
             let progress = external::codex_progress(&thread.rollout);
-            session.state = match &progress {
-                Some(p) if p.working => SessionState::Working,
-                Some(_) => SessionState::Idle,
+            session.state = match progress.as_ref().and_then(|p| p.working) {
+                Some(true) => SessionState::Working,
+                Some(false) => SessionState::Idle,
                 None => SessionState::Unknown,
             };
             if let Some(progress) = progress {
@@ -755,7 +856,7 @@ impl Sessions {
                 session.last_message_at = progress.last_message_at;
             }
             session.agent_session_id = Some(thread.id.clone());
-            session.controllable = ws.allows(Capability::Input);
+            session.controllable = ws.allows(Capability::Input) && !thread.ambiguous;
             session.pid = Some(thread.pid);
             session.codex_home = Some(thread.home.clone());
             session.attach_command = Some(format!(
@@ -763,13 +864,17 @@ impl Sessions {
                 thread.home.display(),
                 thread.id
             ));
-            session.note = Some("Experimental: text is queued with `codex queue` and delivered when the thread is idle; it never interrupts a running turn.".into());
+            session.note = Some(if thread.ambiguous {
+                "Several Codex sessions run in this folder and the bridge cannot tell which thread belongs to which, so it does not send them input."
+            } else {
+                "Experimental: text is queued with `codex queue` and delivered when the thread is idle; it never interrupts a running turn."
+            }.into());
             sessions.push(session);
         }
         sessions
     }
 
-    async fn find(&self, id: &str) -> Result<Session, ApiError> {
+    async fn find(self: &Arc<Self>, id: &str) -> Result<Session, ApiError> {
         let (sessions, problems) = self.list(None).await;
         sessions.into_iter().find(|s| s.id == id).ok_or_else(|| {
             let mut message = format!(
@@ -786,7 +891,7 @@ impl Sessions {
     /// One session with its terminal output; with `wait`, first waits (up to 90 s) while the
     /// session is working.
     pub async fn get(
-        &self,
+        self: &Arc<Self>,
         id: &str,
         lines: Option<usize>,
         wait: Option<u64>,
@@ -877,9 +982,6 @@ impl Sessions {
         if let Some(model) = &request.model {
             agents::validate_model(model)?;
         }
-        if let Some(resume) = &request.resume {
-            agents::validate_session_ref(resume)?;
-        }
         let runner = match request.runner.unwrap_or(self.config.sessions.runner) {
             RunnerChoice::Tmux => Runner::Tmux,
             RunnerChoice::Headless => Runner::Headless,
@@ -892,39 +994,39 @@ impl Sessions {
             )));
         }
         let keep_alive = request.keep_alive.unwrap_or(true);
-        if agent.kind == AgentKind::Generic && (runner == Runner::Headless || !keep_alive) {
+        if agent.kind == AgentKind::Generic && runner == Runner::Headless {
             return Err(ApiError::bad_request(format!(
-                "Agent `{}` is a generic terminal program: it runs only in tmux and with keep_alive true.",
+                "Agent `{}` is a generic terminal program and runs only in tmux.",
                 agent.name
             )));
         }
-        let active = lock(&self.records).values().filter(|r| r.live()).count();
-        if active >= self.config.limits.max_sessions {
-            return Err(ApiError::too_many(
-                "too_many_sessions",
-                format!(
-                    "{active} sessions started by the bridge are still running (limit {}). Stop one with DELETE /v1/sessions/{{id}} first.",
-                    self.config.limits.max_sessions
-                ),
-                30,
-            ));
-        }
-        if let Some(resume) = &request.resume
-            && agent.kind == AgentKind::Claude
+        if runner == Runner::Tmux
+            && !keep_alive
+            && !matches!(agent.kind, AgentKind::Claude | AgentKind::Codex)
         {
-            let claude = self.claude_agents().await;
-            let open = claude.as_ref().as_ref().ok().and_then(|list| {
-                list.iter()
-                    .find(|c| c.session_id.as_deref() == Some(resume.as_str()) && c.pid.is_some())
-                    .and_then(|c| c.pid)
-            });
-            if let Some(pid) = open {
-                return Err(ApiError::conflict(
-                    "session_open",
-                    format!(
-                        "Claude session `{resume}` is open in another process (pid {pid}). Send input to that session instead of resuming it twice."
-                    ),
-                ));
+            return Err(ApiError::bad_request(format!(
+                "Agent `{}` does not report finished turns in tmux, so `keep_alive: false` would close it on a guess. Use `runner: \"headless\"`, or keep it alive and stop it with DELETE when it is done.",
+                agent.name
+            )));
+        }
+        if let Some(resume) = &request.resume {
+            agents::validate_session_ref(resume)?;
+            self.check_resume(agent, &resolved.path, resume).await?;
+            if agent.kind == AgentKind::Claude {
+                let claude = self.claude_agents().await;
+                let open = claude
+                    .0
+                    .iter()
+                    .find(|c| c.session_id.as_deref() == Some(resume.as_str()) && c.pid.is_some());
+                if let Some(open) = open {
+                    return Err(ApiError::conflict(
+                        "session_open",
+                        format!(
+                            "Claude session `{resume}` is open in another process (pid {}). Send input to that session instead of resuming it twice.",
+                            open.pid.unwrap_or_default()
+                        ),
+                    ));
+                }
             }
         }
 
@@ -957,10 +1059,31 @@ impl Sessions {
             started_at: SystemTime::now(),
             events,
             state: Mutex::new(RecordState {
+                phase: if runner == Runner::Tmux {
+                    Phase::Starting
+                } else {
+                    Phase::Idle
+                },
                 agent_session_id: claude_session_id.or(request.resume.clone()),
                 ..RecordState::default()
             }),
         });
+        {
+            // Count and reserve in one step, so concurrent starts cannot exceed the limit.
+            let mut records = lock(&self.records);
+            let active = records.values().filter(|r| r.live()).count();
+            if active >= self.config.limits.max_sessions {
+                return Err(ApiError::too_many(
+                    "too_many_sessions",
+                    format!(
+                        "{active} sessions started by the bridge are still running (limit {}). Stop one with DELETE /v1/sessions/{{id}} first.",
+                        self.config.limits.max_sessions
+                    ),
+                    30,
+                ));
+            }
+            records.insert(id.clone(), record.clone());
+        }
         tracing::info!(
             caller,
             id,
@@ -974,20 +1097,54 @@ impl Sessions {
         );
         self.claude_cache.lock().await.take();
         match runner {
-            Runner::Tmux => self.start_tmux(record, launch, request.prompt).await?,
+            Runner::Tmux => {
+                if let Err(err) = self.start_tmux(&record, launch, request.prompt).await {
+                    lock(&self.records).remove(&id);
+                    let _ = std::fs::remove_file(self.meta_dir.join(format!("{id}.json")));
+                    return Err(err);
+                }
+            }
             _ => {
-                lock(&self.records).insert(id.clone(), record.clone());
                 if let Some(prompt) = request.prompt {
-                    self.run_turn(&record, prompt);
+                    self.run_turn(&record, prompt)?;
                 }
             }
         }
         self.find(&id).await
     }
 
+    /// Only a conversation that was held in `cwd` may be resumed there; otherwise a client
+    /// could read (and continue) conversations from folders it has no access to.
+    async fn check_resume(&self, agent: &Agent, cwd: &Path, id: &str) -> Result<(), ApiError> {
+        let origin = match agent.kind {
+            AgentKind::Claude => {
+                let held_here = external::claude_dir(agent)
+                    .is_some_and(|dir| external::claude_conversation_in(&dir, cwd, id));
+                held_here.then(|| cwd.to_path_buf())
+            }
+            AgentKind::Codex => {
+                let home = codex_home(agent);
+                let thread = id.to_string();
+                tokio::task::spawn_blocking(move || external::codex_thread_cwd(&home, &thread))
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            AgentKind::Hermes => external::hermes_session_cwd(agent, id).await,
+            AgentKind::Generic => return Ok(()),
+        };
+        match origin.and_then(|path| dunce::canonicalize(path).ok()) {
+            Some(origin) if origin == cwd => Ok(()),
+            _ => Err(ApiError::forbidden(format!(
+                "Conversation `{id}` was not found in `{}`. Only a conversation held in the folder given as `cwd` can be resumed there.",
+                cwd.display()
+            ))),
+        }
+    }
+
     async fn start_tmux(
         self: &Arc<Self>,
-        record: Arc<Record>,
+        record: &Arc<Record>,
         mut launch: Launch,
         prompt: Option<String>,
     ) -> Result<(), ApiError> {
@@ -996,33 +1153,26 @@ impl Sessions {
             crate::tls::create_private_dir(&self.events_dir).map_err(ApiError::internal)?;
         }
         launch.prompt = prompt.clone();
-        let mut argv = record.agent.interactive_argv(&launch)?;
+        let mut argv = record.agent.interactive_argv(&record.cwd, &launch)?;
         argv[0] = resolve_program(&argv[0], &record.agent)?;
-        {
+        if let Some(prompt) = prompt {
             let mut state = record.state();
-            if let Some(prompt) = prompt {
-                state.last_input_at = Some(unix_now());
-                state.sent.push(prompt);
-            }
+            state.last_input_at = Some(unix_now());
+            state.sent.push(prompt);
         }
-        lock(&self.records).insert(record.id.clone(), record.clone());
-        if let Err(err) = tmux
+        self.save_meta(record);
+        let pane = tmux
             .new_session(&record.id, &record.cwd, &record.agent.env, &argv)
             .await
-        {
-            lock(&self.records).remove(&record.id);
-            return Err(ApiError::internal(format!(
-                "cannot start the tmux session: {err:#}"
-            )));
-        }
+            .map_err(|err| ApiError::internal(format!("cannot start the tmux session: {err:#}")))?;
+        record.state().pane = Some(pane.id.clone());
         // An agent that exits at once (unknown flag, missing login) takes its pane with it.
         tokio::time::sleep(Duration::from_millis(800)).await;
         let alive = tmux
             .list_panes()
             .await
-            .map(|panes| panes.iter().any(|p| p.session == record.id));
+            .map(|panes| panes.iter().any(|p| p.id == pane.id));
         if matches!(alive, Ok(false)) {
-            lock(&self.records).remove(&record.id);
             return Err(ApiError::new(
                 StatusCode::BAD_GATEWAY,
                 "agent_exited",
@@ -1033,32 +1183,55 @@ impl Sessions {
                 ),
             ));
         }
+        record.state().phase = Phase::Idle;
         if !record.keep_alive {
             self.watch_until_answered(record.id.clone());
         }
         Ok(())
     }
 
-    fn run_turn(&self, record: &Arc<Record>, prompt: String) {
-        let launch = record.next_launch();
-        {
+    /// Starts a headless turn if none is running, checking and switching the state under one
+    /// lock so that concurrent requests cannot start two turns.
+    fn run_turn(&self, record: &Arc<Record>, prompt: String) -> Result<(), ApiError> {
+        let launch = {
             let mut state = record.state();
+            match state.phase {
+                Phase::Working | Phase::Starting => {
+                    return Err(ApiError::conflict(
+                        "busy",
+                        format!(
+                            "A turn is still running. Wait with GET /v1/sessions/{}?wait=60, then send the next message.",
+                            record.id
+                        ),
+                    ));
+                }
+                Phase::Finished | Phase::Exited => return Err(ended(&record.id)),
+                Phase::Idle | Phase::Failed => {}
+            }
+            let launch = record.launch_for(&state);
+            state.phase = Phase::Working;
             state.turns += 1;
-        }
+            state.error = None;
+            state.last_input_at = Some(unix_now());
+            state.last_message = None;
+            state.last_message_at = None;
+            launch
+        };
         headless::spawn_turn(
             record.clone(),
             launch,
             prompt,
             self.config.sessions.max_turn_secs,
         );
+        Ok(())
     }
 
-    /// Closes a `keep_alive: false` tmux session once its first answer is in.
+    /// Closes a `keep_alive: false` tmux session once its first answer is in. Only Claude Code
+    /// and Codex sessions get here: their turn hooks say when an answer is complete.
     fn watch_until_answered(self: &Arc<Self>, id: String) {
         let sessions = self.clone();
         tokio::spawn(async move {
             let mut seen_working = false;
-            let mut quiet_since: Option<Instant> = None;
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 let Some(record) = sessions.record(&id) else {
@@ -1068,51 +1241,68 @@ impl Sessions {
                     return;
                 }
                 let Ok(session) = sessions.find(&id).await else {
-                    return;
+                    continue;
                 };
-                let done = match session.state {
-                    SessionState::Exited => return,
-                    SessionState::Working => {
-                        seen_working = true;
-                        quiet_since = None;
-                        false
-                    }
-                    SessionState::Waiting => false,
-                    _ => {
-                        let state = record.state();
-                        let tracked = state
-                            .last_turn_at
-                            .zip(state.last_input_at)
-                            .is_some_and(|(turn, input)| turn >= input);
-                        drop(state);
-                        match record.agent.kind {
-                            AgentKind::Claude | AgentKind::Codex => {
-                                tracked || (seen_working && record.agent.kind == AgentKind::Claude)
-                            }
-                            _ => {
-                                let since = *quiet_since.get_or_insert_with(Instant::now);
-                                seen_working
-                                    && since.elapsed() >= Duration::from_secs(HEURISTIC_DONE_SECS)
+                match session.state {
+                    SessionState::Exited | SessionState::Finished => return,
+                    SessionState::Working => seen_working = true,
+                    SessionState::Idle => {
+                        let answered = {
+                            let state = record.state();
+                            state
+                                .last_turn_at
+                                .zip(state.last_input_at)
+                                .is_some_and(|(turn, input)| turn >= input)
+                        };
+                        // Without a hook event (hooks disabled), Claude's own idle status after
+                        // having been busy is the next best signal.
+                        let claude_done = seen_working && record.agent.kind == AgentKind::Claude;
+                        if answered || claude_done {
+                            match sessions.close_tmux(&record, Phase::Finished).await {
+                                Ok(()) => {
+                                    tracing::info!(
+                                        id,
+                                        "session answered and was closed (keep_alive: false)"
+                                    );
+                                    return;
+                                }
+                                Err(err) => tracing::warn!(
+                                    id,
+                                    "closing the session failed: {}",
+                                    err.message
+                                ),
                             }
                         }
                     }
-                };
-                if done {
-                    sessions.close_tmux(&record, Phase::Finished).await;
-                    tracing::info!(id, "session answered and was closed (keep_alive: false)");
-                    return;
+                    _ => {}
                 }
             }
         });
     }
 
-    async fn close_tmux(&self, record: &Record, phase: Phase) {
+    /// Kills a bridge tmux session, keeping its final screen. Fails if it may still be running.
+    async fn close_tmux(&self, record: &Record, phase: Phase) -> Result<(), ApiError> {
         if let Some(tmux) = &self.tmux {
             let screen = tmux
-                .capture(&tmux::session_target(&record.id), FINAL_SCREEN_LINES)
+                .capture(&record.target(), FINAL_SCREEN_LINES)
                 .await
                 .ok();
-            let _ = tmux.kill_session(&record.id).await;
+            if let Err(err) = tmux.kill_session(&record.id).await {
+                let gone = tmux
+                    .list_panes()
+                    .await
+                    .is_ok_and(|panes| !panes.iter().any(|p| p.session == record.id));
+                if !gone {
+                    return Err(ApiError::new(
+                        StatusCode::BAD_GATEWAY,
+                        "stop_failed",
+                        format!(
+                            "Could not stop tmux session `{}` ({err:#}); it may still be running. Try again.",
+                            record.id
+                        ),
+                    ));
+                }
+            }
             let mut state = record.state();
             if screen.is_some() {
                 state.final_screen = screen;
@@ -1120,11 +1310,12 @@ impl Sessions {
             state.phase = phase;
             state.ended_at = Some(SystemTime::now());
         }
+        Ok(())
     }
 
     /// Sends text and/or keys. `caller` is the token name, for the audit log.
     pub async fn input(
-        &self,
+        self: &Arc<Self>,
         id: &str,
         request: InputRequest,
         caller: &str,
@@ -1164,12 +1355,7 @@ impl Sessions {
             .ok_or_else(|| ApiError::internal("unknown workspace"))?;
         paths::require(ws, Capability::Input)?;
         if matches!(session.state, SessionState::Finished | SessionState::Exited) {
-            return Err(ApiError::conflict(
-                "ended",
-                format!(
-                    "Session `{id}` has ended. Start a new session (with `resume` set to its `agent_session_id` to continue the conversation)."
-                ),
-            ));
+            return Err(ended(id));
         }
         match session.runner {
             Runner::Headless => {
@@ -1181,17 +1367,17 @@ impl Sessions {
                 let record = self
                     .record(id)
                     .ok_or_else(|| ApiError::not_found(format!("No session `{id}`.")))?;
-                if record.state().phase == Phase::Working {
-                    return Err(ApiError::conflict(
-                        "busy",
-                        format!(
-                            "A turn is still running. Wait with GET /v1/sessions/{id}?wait=60, then send the next message."
-                        ),
-                    ));
-                }
-                self.run_turn(&record, text.clone().unwrap_or_default());
+                self.run_turn(&record, text.clone().unwrap_or_default())?;
             }
             Runner::Tmux => {
+                if !session.controllable {
+                    return Err(ApiError::conflict(
+                        "not_controllable",
+                        session.note.clone().unwrap_or_else(|| {
+                            "This session cannot take input through the bridge.".into()
+                        }),
+                    ));
+                }
                 let tmux = self
                     .tmux
                     .as_ref()
@@ -1203,12 +1389,15 @@ impl Sessions {
                 if let Some(text) = &text {
                     paste_and_submit(tmux, &target, text, request.submit.unwrap_or(true)).await?;
                     if let Some(record) = self.record(id) {
-                        let mut state = record.state();
-                        state.last_input_at = Some(unix_now());
-                        state.sent.push(text.clone());
-                        if state.sent.len() > 10 {
-                            state.sent.remove(0);
+                        {
+                            let mut state = record.state();
+                            state.last_input_at = Some(unix_now());
+                            state.sent.push(text.clone());
+                            if state.sent.len() > 10 {
+                                state.sent.remove(0);
+                            }
                         }
+                        self.save_meta(&record);
                     }
                 }
                 for key in &keys {
@@ -1258,14 +1447,12 @@ impl Sessions {
                 format!("{err:#}"),
             )
         };
+        let agent = self
+            .config
+            .agent(&session.agent)
+            .ok_or_else(|| ApiError::internal("unknown agent"))?;
         match session.kind {
             AgentKind::Claude => {
-                let agent = self
-                    .config
-                    .agents
-                    .iter()
-                    .find(|a| a.kind == AgentKind::Claude)
-                    .expect("claude agent");
                 let inbox = external::claude_dir(agent)
                     .zip(session.pid)
                     .and_then(|(dir, pid)| external::claude_inbox(&dir, pid))
@@ -1275,12 +1462,6 @@ impl Sessions {
                 external::claude_send(&inbox, text).await.map_err(failed)
             }
             AgentKind::Codex => {
-                let agent = self
-                    .config
-                    .agents
-                    .iter()
-                    .find(|a| a.kind == AgentKind::Codex)
-                    .expect("codex agent");
                 let home = session
                     .codex_home
                     .clone()
@@ -1299,7 +1480,7 @@ impl Sessions {
     }
 
     /// Stops a session the bridge started.
-    pub async fn stop(&self, id: &str, caller: &str) -> Result<Session, ApiError> {
+    pub async fn stop(self: &Arc<Self>, id: &str, caller: &str) -> Result<Session, ApiError> {
         let session = self.find(id).await?;
         let ws = self
             .workspace(&session.workspace)
@@ -1312,15 +1493,18 @@ impl Sessions {
             ));
         };
         match record.runner {
-            Runner::Tmux if record.live() => self.close_tmux(&record, Phase::Exited).await,
+            Runner::Tmux if record.live() => self.close_tmux(&record, Phase::Exited).await?,
             Runner::Headless => {
-                let mut state = record.state();
-                if let Some(pid) = state.child_pid.take() {
+                let pid = {
+                    let mut state = record.state();
+                    if !matches!(state.phase, Phase::Finished | Phase::Exited) {
+                        state.phase = Phase::Exited;
+                        state.ended_at = Some(SystemTime::now());
+                    }
+                    state.child_pid.take()
+                };
+                if let Some(pid) = pid {
                     headless::kill_tree(pid);
-                }
-                if !matches!(state.phase, Phase::Finished | Phase::Exited) {
-                    state.phase = Phase::Exited;
-                    state.ended_at = Some(SystemTime::now());
                 }
             }
             _ => {}
@@ -1329,13 +1513,52 @@ impl Sessions {
         self.get(id, None, None).await
     }
 
-    /// Kills running headless turns; tmux sessions keep running.
-    pub fn shutdown(&self) {
-        for record in lock(&self.records).values() {
-            if let Some(pid) = record.state().child_pid.take() {
-                headless::kill_tree(pid);
-            }
+    /// Stops running headless turns and waits for them; tmux sessions keep running.
+    pub async fn shutdown(&self) {
+        let pids: Vec<u32> = lock(&self.records)
+            .values()
+            .filter_map(|record| record.state().child_pid.take())
+            .collect();
+        let tasks: Vec<_> = pids
+            .into_iter()
+            .map(|pid| tokio::spawn(headless::terminate_tree(pid)))
+            .collect();
+        for task in tasks {
+            let _ = task.await;
         }
+    }
+
+    fn save_meta(&self, record: &Record) {
+        if record.runner != Runner::Tmux {
+            return;
+        }
+        let meta = {
+            let state = record.state();
+            RecordMeta {
+                keep_alive: record.keep_alive,
+                last_input_at: state.last_input_at,
+                sent: state.sent.clone(),
+            }
+        };
+        let path = self.meta_dir.join(format!("{}.json", record.id));
+        let written = crate::tls::create_private_dir(&self.meta_dir)
+            .map_err(|err| err.to_string())
+            .and_then(|()| serde_json::to_vec(&meta).map_err(|err| err.to_string()))
+            .and_then(|bytes| std::fs::write(&path, bytes).map_err(|err| err.to_string()));
+        if let Err(err) = written {
+            tracing::warn!("cannot save {}: {err}", path.display());
+        }
+    }
+
+    fn load_meta(&self, id: &str) -> RecordMeta {
+        std::fs::read(self.meta_dir.join(format!("{id}.json")))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or(RecordMeta {
+                keep_alive: true,
+                last_input_at: None,
+                sent: Vec::new(),
+            })
     }
 }
 
@@ -1369,6 +1592,15 @@ impl Session {
     }
 }
 
+fn ended(id: &str) -> ApiError {
+    ApiError::conflict(
+        "ended",
+        format!(
+            "Session `{id}` has ended. Start a new session in the same folder, with `resume` set to its `agent_session_id` to continue the conversation."
+        ),
+    )
+}
+
 /// tmux session name for a new session: readable in `tmux ls`, unique by a random suffix.
 pub fn new_session_name(cwd: &Path, agent: &str) -> String {
     let slug: String = cwd
@@ -1392,12 +1624,26 @@ pub fn new_session_name(cwd: &Path, agent: &str) -> String {
 
 /// The absolute path of an agent's program, so tmux does not depend on its own `PATH`.
 pub fn resolve_program(program: &str, agent: &Agent) -> Result<String, ApiError> {
-    exec::which(program).map(|p| p.display().to_string()).ok_or_else(|| {
-        ApiError::unavailable(format!(
-            "`{program}` (agent `{}`) is not installed on this machine's PATH, so it cannot be started; retrying will not help. Only the machine's owner can install it or set an absolute `command` in [agents.{}]. GET /v1/info shows which agents are available.",
-            agent.name, agent.name
-        ))
-    })
+    exec::which(program)
+        .map(|p| p.display().to_string())
+        .ok_or_else(|| {
+            ApiError::unavailable(format!(
+                "`{program}` (agent `{}`) is not installed on this machine's PATH, so it cannot be started; retrying will not help. Only the machine's owner can install it or set an absolute `command` in [agents.{}]. GET /v1/info shows which agents are available.",
+                agent.name, agent.name
+            ))
+        })
+}
+
+/// The Codex home of an agent: its `CODEX_HOME`, the bridge's, or `~/.codex`.
+fn codex_home(agent: &Agent) -> PathBuf {
+    agent
+        .env
+        .iter()
+        .find(|(key, _)| key == "CODEX_HOME")
+        .map(|(_, value)| PathBuf::from(value))
+        .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+        .unwrap_or_else(|| PathBuf::from(".codex"))
 }
 
 fn resume_command(agent: &Agent, id: &str) -> Option<String> {
@@ -1431,8 +1677,8 @@ fn main_thread_events<'a>(
                     .and_then(|e| e.session_id.clone());
             }
             if state.agent_session_id.is_none() {
-                // Without bridge input to match (e.g. after a restart), skip Codex's title
-                // generation, whose answer is a `{"title": …}` object.
+                // Without bridge input to match (e.g. a session started by hand), skip Codex's
+                // title generation, whose answer is a `{"title": …}` object.
                 state.agent_session_id = events
                     .iter()
                     .rev()
@@ -1477,6 +1723,13 @@ fn claude_state(claude: &ClaudeAgent) -> Option<(SessionState, Option<String>)> 
     }
 }
 
+struct Derived {
+    state: SessionState,
+    waiting_for: Option<String>,
+    /// Based only on terminal activity.
+    estimated: bool,
+}
+
 /// State of a tmux session from the best available source: Claude Code's own status, the turn
 /// hook (a turn started by bridge input runs until its event arrives), or terminal activity.
 fn tmux_state(
@@ -1486,37 +1739,46 @@ fn tmux_state(
     input_at: Option<u64>,
     turn_at: Option<u64>,
     now: u64,
-) -> (SessionState, Option<String>) {
+) -> Derived {
+    let known = |state, waiting_for| Derived {
+        state,
+        waiting_for,
+        estimated: false,
+    };
     if pane.dead {
-        return (SessionState::Exited, None);
+        return known(SessionState::Exited, None);
     }
     let quiet = now.saturating_sub(pane.activity);
     let pending = matches!(kind, AgentKind::Claude | AgentKind::Codex)
         && input_at.is_some_and(|input| turn_at.is_none_or(|turn| turn < input));
     let reported = claude.and_then(claude_state);
     match reported {
-        Some((SessionState::Waiting, why)) => return (SessionState::Waiting, why),
-        Some((SessionState::Working, _)) => return (SessionState::Working, None),
+        Some((SessionState::Waiting, why)) => return known(SessionState::Waiting, why),
+        Some((SessionState::Working, _)) => return known(SessionState::Working, None),
         // Claude Code reports `idle` for a moment after the bridge submits input, so an idle
         // status alone does not end a pending turn; its hook event does.
-        Some(state) if !pending => return state,
+        Some((state, why)) if !pending => return known(state, why),
         _ => {}
     }
     if pending {
         return match (quiet >= WAITING_SECS, reported.is_some()) {
-            (false, _) => (SessionState::Working, None),
+            (false, _) => known(SessionState::Working, None),
             // Claude says idle and the terminal is quiet: the turn ended without a hook event.
-            (true, true) => (SessionState::Idle, None),
-            (true, false) => (
+            (true, true) => known(SessionState::Idle, None),
+            (true, false) => known(
                 SessionState::Waiting,
                 Some("input or approval (no output for a while)".into()),
             ),
         };
     }
-    if quiet < ACTIVE_SECS {
-        (SessionState::Working, None)
-    } else {
-        (SessionState::Idle, None)
+    Derived {
+        state: if quiet < ACTIVE_SECS {
+            SessionState::Working
+        } else {
+            SessionState::Idle
+        },
+        waiting_for: None,
+        estimated: true,
     }
 }
 
@@ -1546,7 +1808,7 @@ async fn paste_and_submit(
         .await
         .map_err(fail)?
         .iter()
-        .any(|p| p.in_mode && (p.id == target || tmux::session_target(&p.session) == target));
+        .any(|p| p.in_mode && p.id == target);
     if in_mode {
         tmux.cancel_mode(target).await.map_err(fail)?;
     }
@@ -1602,6 +1864,7 @@ mod tests {
             dead: false,
             command: "x".into(),
             cwd: PathBuf::from("/"),
+            start_command: "claude".into(),
         }
     }
 
@@ -1618,8 +1881,9 @@ mod tests {
             state: None,
             waiting_for: Some("permission prompt".into()),
             started_at: None,
+            agent: "claude".into(),
         };
-        let (state, why) = tmux_state(
+        let derived = tmux_state(
             AgentKind::Claude,
             &pane(now),
             Some(&waiting),
@@ -1628,48 +1892,55 @@ mod tests {
             now,
         );
         assert_eq!(
-            (state, why.as_deref()),
-            (SessionState::Waiting, Some("permission prompt"))
+            (
+                derived.state,
+                derived.waiting_for.as_deref(),
+                derived.estimated
+            ),
+            (SessionState::Waiting, Some("permission prompt"), false)
         );
-
-        // Codex: input sent at 990, no turn event yet.
+        // A lagging `idle` status does not end a turn the bridge just started …
+        let idle = ClaudeAgent {
+            status: Some("idle".into()),
+            waiting_for: None,
+            ..waiting.clone()
+        };
+        let state = |kind, activity, claude, input, turn| {
+            tmux_state(kind, &pane(activity), claude, input, turn, now).state
+        };
         assert_eq!(
-            tmux_state(AgentKind::Codex, &pane(now), None, Some(990), None, now).0,
+            state(AgentKind::Claude, now, Some(&idle), Some(999), None),
+            SessionState::Working
+        );
+        // … but a long quiet period with an idle status does, and so does the hook event.
+        assert_eq!(
+            state(AgentKind::Claude, now - 20, Some(&idle), Some(970), None),
+            SessionState::Idle
+        );
+        assert_eq!(
+            state(AgentKind::Claude, now, Some(&idle), Some(990), Some(995)),
+            SessionState::Idle
+        );
+        // Codex: input sent, no turn event yet.
+        assert_eq!(
+            state(AgentKind::Codex, now, None, Some(990), None),
             SessionState::Working
         );
         assert_eq!(
-            tmux_state(
-                AgentKind::Codex,
-                &pane(now - 30),
-                None,
-                Some(960),
-                None,
-                now
-            )
-            .0,
+            state(AgentKind::Codex, now - 30, None, Some(960), None),
             SessionState::Waiting
         );
         assert_eq!(
-            tmux_state(
-                AgentKind::Codex,
-                &pane(now - 30),
-                None,
-                Some(960),
-                Some(965),
-                now
-            )
-            .0,
+            state(AgentKind::Codex, now - 30, None, Some(960), Some(965)),
             SessionState::Idle
         );
-        // Untracked agents: terminal activity.
+        // Untracked agents: terminal activity, marked as an estimate.
         assert_eq!(
-            tmux_state(AgentKind::Hermes, &pane(now - 1), None, None, None, now).0,
+            state(AgentKind::Hermes, now - 1, None, None, None),
             SessionState::Working
         );
-        assert_eq!(
-            tmux_state(AgentKind::Hermes, &pane(now - 10), None, None, None, now).0,
-            SessionState::Idle
-        );
+        let quiet = tmux_state(AgentKind::Hermes, &pane(now - 10), None, None, None, now);
+        assert_eq!((quiet.state, quiet.estimated), (SessionState::Idle, true));
     }
 
     #[test]

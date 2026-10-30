@@ -35,8 +35,9 @@ them and follow up while you are away from the keyboard, for example from your p
     and terminal activity, so the client knows when an agent is working, waiting for an answer or
     done. It long-polls instead of guessing.
 - **Read-only project access.** Directory listings (respecting `.gitignore`), text files by line
-  range, `git status`, `log`, `diff` and `show`. Secrets such as `.env` files and private keys are
-  never served.
+  range, `git status`, `log`, `diff` and `show`. The file endpoints never serve secrets such as
+  `.env` files and private keys. Git output is not filtered, so anything committed to a
+  repository you expose is visible.
 - **Security first.**
   - 256-bit bearer tokens (only their hashes are stored), with per-IP lockout after failed
     attempts and per-token rate limits.
@@ -123,6 +124,11 @@ curl -sH "$H" "$B/v1/git/log?dir=/home/me/projects/app&limit=10"
 Session states: `working`, `waiting` (a permission prompt or question; read `screen` and answer
 with `keys`), `idle`, `finished` (closed after its answer with `keep_alive: false`), `exited`,
 `failed`, `unknown`.
+
+The bridge types only into panes that close with the agent: sessions it started, and panes
+created with the agent as their command. An agent you started from a shell inside tmux is listed
+but not controllable, because text sent after the agent exits would reach the shell. `resume`
+continues a conversation only in the folder where it was held.
 
 ## Security
 

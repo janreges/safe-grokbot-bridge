@@ -71,7 +71,7 @@ path = "/home/me/projects"
 allow = ["files", "git", "sessions", "input", "start"]
 agents = ["claude", "codex", "codex-sol"]
 allow_bypass_permissions = false
-deny = ["*.sqlite", "secrets/"]
+deny = ["*.sqlite", "secrets/"]      # `secrets/` hides the root-level folder and its contents
 
 [[workspaces]]
 path = "/home/me/projects/client-x"   # nested: more specific rules win here
@@ -173,7 +173,16 @@ The bridge adds the flags for `model` and `effort` itself:
 | `deny` | none | Extra deny patterns for the file endpoints. |
 
 A path belongs to the **most specific** workspace that contains it, after resolving symlinks. A
-nested workspace can therefore have stricter or looser rules than its parent.
+nested workspace can therefore have stricter or looser rules than its parent, and listings of a
+parent leave out what a nested workspace hides.
+
+`start` and `input` require `sessions`, so that a client can see the sessions it starts and
+drives.
+
+**Git works on whole repositories.** A git request is allowed only when the repository's root
+lies in a workspace with `git`, and no workspace inside the repository forbids it. Exposing just
+a subfolder of a repository therefore does not expose its git history; expose the repository
+root instead.
 
 | Capability | Grants |
 |---|---|
@@ -196,7 +205,8 @@ Files matching a deny pattern are hidden from listings and refused by `/v1/files
 
 - A pattern **without** `/` matches any single path component, so `.env` also hides
   `app/.env`, and `.ssh` hides everything inside it.
-- A pattern **with** `/` matches the path relative to the workspace root (`build/*.log`).
+- A pattern **with** `/` is anchored at the workspace root and also covers everything inside a
+  matching directory: `build/*.log`, `private/secrets` (or `private/secrets/`).
 - Matching is case-insensitive.
 
 Deny patterns do not filter git history. Anything that was ever committed is visible through the

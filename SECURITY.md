@@ -30,8 +30,12 @@ The full threat model is in [docs/design.md](docs/design.md#6-security-model).
 - Failed authentications block the client address for a while. Requests are rate-limited per
   token, and every request is logged with the token name.
 - The bridge never runs arbitrary commands. Git and agents are started from argument vectors
-  (never a shell) with validated arguments, and git runs with options that keep repository config
-  from executing programs.
+  (never a shell) with validated arguments. Git runs without the pager, fsmonitor, external diff
+  drivers, textconv, filter drivers and submodule recursion, so a repository's own configuration
+  cannot make a read request execute programs. Git access is granted per repository, not per
+  folder.
+- Text is typed only into tmux panes that close with their agent, never into a pane where an
+  interactive shell would receive it after the agent exits.
 
 The first prompt of a tmux session and messages queued for external Codex sessions are passed
 on command lines. Other local users of the same machine can see them with `ps`.

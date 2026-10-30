@@ -136,7 +136,8 @@ fn token(name: &str) -> Result<()> {
     println!("Token (shown only once, store it in your client's secret store):\n\n  {token}\n");
     println!("Add this to the config file and restart the bridge:\n");
     println!(
-        "[[tokens]]\nname = \"{name}\"\nsha256 = \"{}\"",
+        "[[tokens]]\nname = {}\nsha256 = \"{}\"",
+        toml::Value::String(name.to_string()),
         auth::hash_token(&token)
     );
     Ok(())
@@ -332,7 +333,7 @@ fn launch(path: &Path, agent_name: &str, extra: Vec<String>) -> Result<()> {
         ..Launch::default()
     };
     let mut argv = agent
-        .interactive_argv(&launch)
+        .interactive_argv(&cwd, &launch)
         .map_err(|e| anyhow!(e.message))?;
     argv[0] = sessions::resolve_program(&argv[0], &agent).map_err(|e| anyhow!(e.message))?;
     let tmux = Tmux::new(

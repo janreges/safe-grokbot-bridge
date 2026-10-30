@@ -47,9 +47,13 @@ pub struct ClaudeAgent {
     pub state: Option<String>,
     pub waiting_for: Option<String>,
     pub started_at: Option<u64>,
+    /// Name of the configured agent (Claude profile) that reported this session.
+    #[serde(skip)]
+    pub agent: String,
 }
 
-/// Running Claude Code sessions on this machine (interactive and background).
+/// Running Claude Code sessions on this machine (interactive and background), as seen by one
+/// configured Claude agent (profile).
 pub async fn claude_agents(agent: &Agent) -> Result<Vec<ClaudeAgent>, String> {
     let mut cmd = Command::new(&agent.command);
     scrub_env(&mut cmd);
@@ -61,7 +65,22 @@ pub async fn claude_agents(agent: &Agent) -> Result<Vec<ClaudeAgent>, String> {
     if !out.success() {
         return Err(out.stderr.trim().to_string());
     }
-    serde_json::from_str(&out.stdout).map_err(|err| format!("unexpected output: {err}"))
+    let mut list: Vec<ClaudeAgent> =
+        serde_json::from_str(&out.stdout).map_err(|err| format!("unexpected output: {err}"))?;
+    for entry in &mut list {
+        entry.agent = agent.name.clone();
+    }
+    Ok(list)
+}
+
+/// Whether a Claude Code conversation was held in `cwd`: its transcript lives in the project
+/// folder Claude Code derives from `cwd`.
+pub fn claude_conversation_in(claude_dir: &Path, cwd: &Path, session_id: &str) -> bool {
+    claude_dir
+        .join("projects")
+        .join(claude_project_dir(cwd))
+        .join(format!("{session_id}.jsonl"))
+        .is_file()
 }
 
 /// Claude Code's config directory (`CLAUDE_CONFIG_DIR`, default `~/.claude`).
@@ -213,6 +232,8 @@ pub struct CodexThread {
     pub home: PathBuf,
     pub pid: u32,
     pub rollout: PathBuf,
+    /// Several Codex sessions run in the same folder, so the thread may belong to another one.
+    pub ambiguous: bool,
 }
 
 /// Codex subcommands that are not interactive sessions.
@@ -250,16 +271,23 @@ fn default_codex_home() -> Option<PathBuf> {
 
 /// Finds interactive Codex processes and the rollout (thread) each one is writing.
 pub fn codex_threads(snapshot: &Snapshot, codex_command: &str) -> Vec<CodexThread> {
-    let mut seen: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mut threads = Vec::new();
-    for process in snapshot.processes() {
-        if !procs::runs_command(process, codex_command)
-            || process
+    let is_codex = |process: &ProcInfo| {
+        procs::runs_command(process, codex_command)
+            && !process
                 .cmd
                 .iter()
                 .skip(1)
                 .any(|arg| CODEX_NON_INTERACTIVE.contains(&arg.as_str()))
-        {
+    };
+    // A launcher (node) and the native binary it starts both match; keep the outermost.
+    let mut groups: std::collections::BTreeMap<(PathBuf, PathBuf), Vec<&ProcInfo>> =
+        std::collections::BTreeMap::new();
+    for process in snapshot.processes() {
+        let launched_by_codex = process
+            .parent
+            .and_then(|parent| snapshot.get(parent))
+            .is_some_and(is_codex);
+        if !is_codex(process) || launched_by_codex {
             continue;
         }
         let Some(cwd) = process
@@ -276,22 +304,62 @@ pub fn codex_threads(snapshot: &Snapshot, codex_command: &str) -> Vec<CodexThrea
             .map(PathBuf::from)
             .or_else(default_codex_home);
         let Some(home) = home else { continue };
-        // A launcher (node) and the native binary both match; keep one per home and folder.
-        if seen.iter().any(|(h, c)| h == &home && c == &cwd) {
-            continue;
-        }
-        seen.push((home.clone(), cwd.clone()));
-        if let Some((id, rollout)) = rollout_of(&home, &cwd, process) {
-            threads.push(CodexThread {
-                id,
-                cwd,
-                home,
-                pid: process.pid,
-                rollout,
-            });
+        groups.entry((home, cwd)).or_default().push(process);
+    }
+    let mut threads = Vec::new();
+    for ((home, cwd), processes) in groups {
+        let ambiguous = processes.len() > 1;
+        for process in processes {
+            if let Some((id, rollout)) = rollout_of(&home, &cwd, process) {
+                threads.push(CodexThread {
+                    id,
+                    cwd: cwd.clone(),
+                    home: home.clone(),
+                    pid: process.pid,
+                    rollout,
+                    ambiguous,
+                });
+            }
         }
     }
     threads
+}
+
+/// The folder a Codex thread was started in, from its rollout file
+/// (`sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl`).
+pub fn codex_thread_cwd(home: &Path, thread: &str) -> Option<PathBuf> {
+    let suffix = format!("-{thread}.jsonl");
+    for year in sorted_dirs(&home.join("sessions")) {
+        for month in sorted_dirs(&year) {
+            for day in sorted_dirs(&month) {
+                for file in std::fs::read_dir(&day).into_iter().flatten().flatten() {
+                    if file.file_name().to_string_lossy().ends_with(&suffix) {
+                        return rollout_meta(&file.path()).map(|meta| meta.cwd);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The folder a Hermes session belongs to, from `hermes sessions export`.
+pub async fn hermes_session_cwd(agent: &Agent, session_id: &str) -> Option<PathBuf> {
+    let mut cmd = Command::new(&agent.command);
+    scrub_env(&mut cmd);
+    cmd.envs(agent.env.iter().map(|(k, v)| (k, v))).args([
+        "sessions",
+        "export",
+        "-",
+        "--session-id",
+        session_id,
+    ]);
+    let out = exec::run(cmd, None, Duration::from_secs(30), 64 * 1024 * 1024)
+        .await
+        .ok()?;
+    let first = out.stdout.lines().next()?;
+    let record: Value = serde_json::from_str(first).ok()?;
+    record["cwd"].as_str().map(PathBuf::from)
 }
 
 /// The rollout (thread) a live Codex process works on, as `(thread id, path)`: the thread named
@@ -395,7 +463,8 @@ fn rollout_meta(path: &Path) -> Option<RolloutMeta> {
 /// The state of a Codex thread from its rollout: whether a turn is running, and the last answer
 /// with its completion time.
 pub struct CodexProgress {
-    pub working: bool,
+    /// `None` when the rollout's recent part shows no turn event.
+    pub working: Option<bool>,
     pub last_message: Option<String>,
     pub last_message_at: Option<String>,
 }
@@ -436,7 +505,7 @@ pub fn codex_progress(rollout: &Path) -> Option<CodexProgress> {
     }
     let (last_message, last_message_at) = last.unwrap_or((None, None));
     Some(CodexProgress {
-        working: working.unwrap_or(false),
+        working,
         last_message,
         last_message_at,
     })
@@ -565,6 +634,7 @@ mod tests {
         std::fs::write(&rollout, lines.join("\n")).unwrap();
         let process = |start_time: u64, cmd: &[&str]| ProcInfo {
             pid: 7,
+            parent: None,
             start_time,
             name: "codex".into(),
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
@@ -587,8 +657,10 @@ mod tests {
             Some(("t-1".into(), rollout.clone()))
         );
         assert!(rollout_of(home.path(), Path::new("/elsewhere"), &fresh).is_none());
+        assert_eq!(codex_thread_cwd(home.path(), "t-1"), Some(cwd.clone()));
+        assert_eq!(codex_thread_cwd(home.path(), "t-2"), None);
         let progress = codex_progress(&rollout).unwrap();
-        assert!(progress.working);
+        assert_eq!(progress.working, Some(true));
         assert_eq!(progress.last_message.as_deref(), Some("Done."));
         assert_eq!(
             progress.last_message_at.as_deref(),

@@ -3,7 +3,7 @@
 //! Doc comments on handlers and types become the OpenAPI descriptions. Their reader is usually an
 //! LLM agent, so they say what a field means and what to do next.
 
-use std::sync::Arc;
+use std::sync::OnceLock;
 
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -49,7 +49,7 @@ the session stops working instead of polling in a tight loop.
     modifiers(&SecurityAddon),
     security(("bearer" = [])),
     tags(
-        (name = "info", description = "Machine overview"),
+        (name = "info", description = "Machine overview and this API's description"),
         (name = "files", description = "Read-only file access"),
         (name = "git", description = "Read-only git access"),
         (name = "sessions", description = "Agent sessions: list, start, talk to, stop"),
@@ -77,6 +77,7 @@ impl Modify for SecurityAddon {
 
 fn api_routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(openapi_document))
         .routes(routes!(info))
         .routes(routes!(list_files))
         .routes(routes!(read_file))
@@ -91,24 +92,75 @@ fn api_routes() -> OpenApiRouter<AppState> {
 
 /// The OpenAPI document served at `/openapi.json`.
 pub fn openapi() -> utoipa::openapi::OpenApi {
-    api_routes().split_for_parts().1
+    let mut openapi = api_routes().split_for_parts().1;
+    add_common_responses(&mut openapi);
+    openapi
+}
+
+static OPENAPI: OnceLock<utoipa::openapi::OpenApi> = OnceLock::new();
+
+/// This OpenAPI document.
+#[utoipa::path(get, path = "/openapi.json", tag = "info", responses(
+    (status = 200, description = "The OpenAPI 3.1 document of this API", body = serde_json::Value),
+))]
+async fn openapi_document() -> Json<utoipa::openapi::OpenApi> {
+    Json(OPENAPI.get_or_init(openapi).clone())
+}
+
+/// Every authenticated operation can answer 401 (bad token) and 429 (rate limit or lockout,
+/// with `Retry-After`); declaring them once keeps the handlers readable.
+fn add_common_responses(openapi: &mut utoipa::openapi::OpenApi) {
+    use utoipa::openapi::content::ContentBuilder;
+    use utoipa::openapi::header::HeaderBuilder;
+    use utoipa::openapi::schema::{ObjectBuilder, Type};
+    use utoipa::openapi::{Ref, ResponseBuilder};
+
+    let error = || {
+        ContentBuilder::new()
+            .schema(Some(Ref::from_schema_name("ErrorBody")))
+            .build()
+    };
+    let unauthorized = ResponseBuilder::new()
+        .description("Missing or invalid token")
+        .content("application/json", error())
+        .build();
+    let retry_after = HeaderBuilder::new()
+        .schema(Some(ObjectBuilder::new().schema_type(Type::Integer)))
+        .description(Some("Seconds to wait before retrying"))
+        .build();
+    let too_many = ResponseBuilder::new()
+        .description("Rate limit exceeded, or this address is blocked after failed authentications")
+        .content("application/json", error())
+        .header("Retry-After", retry_after)
+        .build();
+    for (path, item) in openapi.paths.paths.iter_mut() {
+        if path == "/healthz" {
+            continue;
+        }
+        let operations = [
+            &mut item.get,
+            &mut item.post,
+            &mut item.put,
+            &mut item.delete,
+        ];
+        for operation in operations.into_iter().flatten() {
+            let responses = &mut operation.responses.responses;
+            responses
+                .entry("401".into())
+                .or_insert_with(|| unauthorized.clone().into());
+            responses
+                .entry("429".into())
+                .or_insert_with(|| too_many.clone().into());
+        }
+    }
 }
 
 pub fn router(app: AppState) -> Router {
-    let (routes, openapi) = api_routes().split_for_parts();
-    let openapi = Arc::new(openapi);
-    let protected = routes
-        .route(
-            "/openapi.json",
-            get(move || {
-                let openapi = openapi.clone();
-                async move { Json(openapi.as_ref().clone()) }
-            }),
-        )
-        .layer(middleware::from_fn_with_state(
-            app.clone(),
-            auth::middleware,
-        ));
+    let (routes, _) = api_routes().split_for_parts();
+    let protected = routes.layer(middleware::from_fn_with_state(
+        app.clone(),
+        auth::middleware,
+    ));
     Router::new()
         .route("/healthz", get(healthz))
         .merge(protected)
@@ -119,7 +171,17 @@ pub fn router(app: AppState) -> Router {
 /// Turns a JSON body parse failure into the API's JSON error format.
 fn json<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     body.map(|Json(b)| b).map_err(|rejection| {
-        ApiError::bad_request(format!("Invalid JSON body: {}", rejection.body_text()))
+        let status = rejection.status();
+        let code = if status == StatusCode::PAYLOAD_TOO_LARGE {
+            "too_large"
+        } else {
+            "invalid_request"
+        };
+        ApiError::new(
+            status,
+            code,
+            format!("Invalid JSON body: {}", rejection.body_text()),
+        )
     })
 }
 
@@ -276,10 +338,12 @@ pub struct ListFilesQuery {
     pub depth: Option<usize>,
     /// Maximum number of entries, 1–2000 (default 200).
     pub limit: Option<usize>,
+    /// Entries to skip, for the next page (use `next_offset` from the previous response).
+    pub offset: Option<usize>,
 }
 
-/// Lists a directory. Entries ignored by `.gitignore` or matching the workspace's deny patterns
-/// (secrets such as `.env` files and keys) are left out.
+/// Lists a directory in path order, page by page. Entries ignored by `.gitignore` or matching
+/// the workspace's deny patterns (secrets such as `.env` files and keys) are left out.
 #[utoipa::path(get, path = "/v1/files", tag = "files", params(ListFilesQuery), responses(
     (status = 200, body = FileList),
     (status = 400, description = "Not an absolute directory path", body = ErrorBody),
@@ -295,10 +359,12 @@ async fn list_files(
         let resolved = paths::resolve(&app.config, &q.path)?;
         paths::require(resolved.workspace, Capability::Files)?;
         files::list(
+            &app.config,
             resolved.workspace,
             &resolved.path,
             q.depth.unwrap_or(1),
             q.limit.unwrap_or(200),
+            q.offset.unwrap_or(0),
         )
     })
     .await
@@ -410,6 +476,8 @@ async fn git_in(
             "`{dir}` is not a directory. Pass the repository folder as `dir`."
         )));
     }
+    let toplevel = git::toplevel(&resolved.path).await?;
+    paths::require_git_scope(&app.config, &toplevel)?;
     git::run(&resolved.path, request).await.map(Json)
 }
 

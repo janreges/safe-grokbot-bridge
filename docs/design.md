@@ -75,7 +75,7 @@ Grok Bot cloud computer ── curl, HTTPS :443, Bearer token ──► Cloudfla
    no inbound port is opened. A Cloudflare Access service-token policy can be added as a second
    factor, because the client simply sends two more headers.
 2. **Direct TLS on a public IP (VPS, port forward).** The bridge listens on a public address with
-   TLS. By default it generates a self-signed certificate once, stores it, and prints its
+   TLS (HTTP/1.1). By default it generates a self-signed certificate once, stores it, and prints its
    public-key pin. Clients pin it with `curl --pinnedpubkey "sha256//<pin>"`, which gives
    certificate-authority-free authentication of the server. A user-provided certificate (for
    example Let's Encrypt) can be configured instead. For Grok Bot the port must be 443.
@@ -205,9 +205,21 @@ explicit opt-in.
 **Deny patterns** hide secrets from `files` endpoints, both in listings and in reads. Defaults:
 `.git`, `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.kdbx`, `id_rsa*`, `id_ecdsa*`,
 `id_ed25519*`, `.ssh`, `.gnupg`, `.aws`, `.azure`, `.kube`, `.docker`, `.netrc`, `.npmrc`,
-`.pypirc`, `.git-credentials`, `.credentials.json`, `auth.json`. A pattern without `/` matches any path component; a
-pattern with `/` matches the relative path from the workspace root. Git history is not filtered:
-anything ever committed is visible through `git` endpoints.
+`.pypirc`, `.git-credentials`, `.credentials.json`, `auth.json`.
+
+- A pattern without `/` matches any path component.
+- A pattern with `/` is anchored at the workspace root and matches the path or any of its
+  ancestors, so a denied folder also hides its contents. A trailing `/` is ignored.
+- Each listed entry is judged by the most specific workspace it belongs to, so a listing of a
+  parent never shows what a nested workspace hides.
+
+Git history is not filtered: anything ever committed is visible through `git` endpoints.
+
+`start` and `input` require `sessions`, because the API answers both with the session.
+
+**Git is authorized per repository.** Git output covers a whole repository, not a folder.
+`dir` must therefore be in a git repository whose root lies in a workspace with `git`, and no
+workspace nested inside that repository may lack `git`.
 
 ## 6. Security model
 
@@ -225,9 +237,13 @@ key.
 | Path traversal / symlink escape | canonicalize then prefix-check against canonical workspace roots |
 | Secret files exfiltrated via file API | default deny patterns plus user patterns |
 | Argument injection into git / agents | argv only, no shell; `--end-of-options` for git revisions; strict validation of revisions, model names, key names; prompts go through stdin or as the final argument after the options |
-| Malicious repo git config (fsmonitor, external diff, textconv) | git runs with `-c core.fsmonitor=false --no-ext-diff --no-textconv` and `GIT_OPTIONAL_LOCKS=0` |
+| Malicious repo git config (fsmonitor, external diff, textconv, filter drivers, submodules) | git runs with `--no-pager`, `-c core.fsmonitor=false`, `--no-ext-diff`, `--no-textconv`, `--ignore-submodules=all`, every configured filter driver blanked (`-c filter.<name>.clean=` …) and `GIT_OPTIONAL_LOCKS=0` |
+| Git output from outside the allowed folders | the repository root must be in a workspace with `git` (see §5) |
+| Text reaching a shell instead of an agent | the bridge types only into panes that close with their agent: its own sessions and panes created with a non-shell command; a shell pane hosting an agent is read-only |
+| Reading conversations from other folders | `resume` requires the conversation to have been held in the requested `cwd` (Claude transcript location, Codex rollout, Hermes session record); Hermes is pinned to `cwd` with `--in` |
 | Unwanted permission bypass | `bypass_permissions` needs a per-workspace opt-in |
-| Slow-loris on a public TLS port | TLS handshake timeout, HTTP header read timeout, connection cap |
+| Slow-loris / connection exhaustion on a public TLS port | HTTP/1.1 only; per-connection task with a 10 s TLS handshake timeout; first request within 15 s; idle connections closed after 150 s; header read timeout; at most 512 connections, 32 per client address |
+| Memory exhaustion | file reads only of regular files, capped while reading; agent output read line by line with caps; request bodies capped at 1 MiB |
 
 **Command lines are visible locally.** The first prompt of a tmux session is passed on the
 agent's command line, and so are messages queued for external Codex sessions (`codex queue`). On
@@ -327,11 +343,21 @@ Used for live, interactive sessions. Requires tmux 3.0 or newer, or psmux on Win
   The initial prompt is the agent's positional argument (Claude, Codex) or `chat -q` (Hermes),
   so there is no race with the TUI starting up. Session names are unique, and a human attaches
   with `tmux attach -t <name>`.
+- **Targeting:** the bridge remembers the pane id the agent runs in and always targets that pane.
+  Panes someone adds to a bridge session (a split, a new window) are ignored.
 - **Discovery:** `tmux list-panes -a` plus a process-tree check (`procs.rs`) finds every pane
   that runs a configured agent inside an allowed workspace, including panes the user started.
-  Claude's session registry also records the tmux pane of each Claude session.
+  Such a pane takes input only when it was created with the agent (or a wrapper script) as its
+  command: if it runs an interactive shell, text sent after the agent exits would reach the
+  shell, so the session is listed read-only.
+- **Restarts:** bridge-named sessions (`sgb-…`, including those from
+  `safe-grokbot-bridge launch`) are adopted on sight. Their `keep_alive` setting and the last
+  input are kept in `<state_dir>/sessions/<id>.json`, so a `keep_alive: false` session is still
+  closed after its answer.
 - **Ids:** a session the bridge started keeps its tmux session name as its id
   (`sgb-<dir>-<agent>-<6hex>`). A pane the user started gets `tmux-<n>` for tmux pane `%<n>`.
+  With psmux on Windows, pane ids are not unique across sessions, so only bridge sessions are
+  listed there.
 - **Text input:** control characters except tab and newline are stripped and CRLF is normalized.
   Then `load-buffer` (from stdin) and `paste-buffer -p -d` deliver a bracketed paste. The bridge
   waits until the pane content changes, then presses `Enter`. Copy mode is cancelled first.
@@ -357,11 +383,15 @@ Used for live, interactive sessions. Requires tmux 3.0 or newer, or psmux on Win
   - Codex: a turn started by the bridge's input is `working` until its hook event arrives. If the
     pane stays quiet for 15 s first, it is `waiting`, typically an approval prompt.
   - Hermes and generic agents: `working` while the pane produced output within the last 3 s
-    (`#{window_activity}`), otherwise `idle`.
-  - A vanished pane is `exited`.
-- **keep_alive = false:** once a turn completes and the session is idle (not waiting), the bridge
-  stores the final screen, kills the tmux session and marks it `finished`. The conversation stays
-  resumable through `resume`.
+    (`#{window_activity}`), otherwise `idle`. This is an estimate, and the session's `note` says
+    so.
+  - A vanished pane is `exited`, but only when tmux answered: if the pane list cannot be read,
+    sessions are reported as `unknown` and the list carries a warning.
+- **keep_alive = false:** once a turn completes (hook event, or Claude's own idle status after
+  being busy), the bridge stores the final screen, kills the tmux session and marks it
+  `finished`. Only Claude Code and Codex report finished turns, so other agents must use the
+  headless runner for this. A failed kill is reported instead of being recorded as success. The
+  conversation stays resumable through `resume`.
 
 ### 8.2 Headless runner
 
@@ -374,11 +404,17 @@ input is one non-interactive turn. The prompt goes through stdin.
 | codex | `codex exec --json --skip-git-repo-check [resume <id>] -` |
 | hermes | `hermes chat -Q --query-file - --in <cwd> [--resume <id>]` |
 
-Streams are parsed line by line. The bridge keeps the agent session id, the latest assistant
-message (shown as progress while the turn runs) and the final answer. On failure it keeps the
+Streams are parsed line by line, with a cap per line and per message. The bridge keeps the agent
+session id, the latest assistant message (shown as progress while the turn runs) and the final
+answer; sending a message clears the previous answer. Claude and Codex must end a turn with a
+result event; a process that exits without one counts as failed. On failure the bridge keeps the
 error message and the stderr tail. A turn is killed with its whole process group after
-`max_turn_secs` or on `DELETE`. Input while a turn runs is rejected with 409 `busy`. With
-`keep_alive = false` the session becomes `finished` after its first turn.
+`max_turn_secs` or on `DELETE`, and the deadline covers draining its output.
+
+Starting a turn checks and changes the session's state under one lock, so concurrent messages
+cannot start two turns: the second gets 409 `busy`. Likewise, `max_sessions` is checked and the
+new session reserved in one step. With `keep_alive = false` the session becomes `finished` after
+its first turn.
 
 ### 8.3 Choosing the runner
 
@@ -391,7 +427,8 @@ Sessions running outside tmux, for example in a plain terminal tab or an IDE.
 
 - **Always (read-only):** Claude sessions from `claude agents --json` whose cwd lies in an allowed
   workspace, with their state, appear with `runner = "external"` and `controllable = false`. A
-  client can then see that someone is already working in a folder.
+  client can then see that someone is already working in a folder. Every configured Claude agent
+  with its own `CLAUDE_CONFIG_DIR` is queried, so separate Claude profiles are covered.
 - **With `[experimental] external_sessions = true`:**
   - Claude: the session becomes controllable. Text is posted to its inbox socket (path from
     `~/.claude/sessions/<pid>.json`, auth token from the published key file) as
@@ -403,8 +440,10 @@ Sessions running outside tmux, for example in a plain terminal tab or an IDE.
   - Codex: live Codex TUIs found by process scan are matched to their thread through the rollout
     files of their `CODEX_HOME`: the thread named by `codex resume <id>`, or else the newest
     thread in the same folder that started after the process. A TUI that has not started a thread
-    yet is not listed. Text is queued with `codex queue --thread <id> --message <text>`, and Codex
-    delivers it when the thread is idle. The last answer is read from the rollout file.
+    yet is not listed. When several Codex sessions run in one folder, the bridge cannot tell
+    their threads apart and lists them without input. Text is queued with
+    `codex queue --thread <id> --message <text>`, and Codex delivers it when the thread is idle.
+    The last answer is read from the rollout file.
 
 External sessions have the ids `claude-<session id>` and `codex-<thread id>`. These paths rely
 on formats that are not stable public interfaces. They are isolated in `external.rs` and fail

@@ -87,12 +87,12 @@ fn pair(flag: &str, value: impl Into<String>) -> [String; 2] {
 }
 
 impl Agent {
-    /// Command line for an interactive session (run in tmux).
-    pub fn interactive_argv(&self, launch: &Launch) -> Result<Vec<String>, ApiError> {
+    /// Command line for an interactive session (run in tmux in `cwd`).
+    pub fn interactive_argv(&self, cwd: &Path, launch: &Launch) -> Result<Vec<String>, ApiError> {
         let mut argv = vec![self.command.clone()];
         match self.kind {
             AgentKind::Claude => {
-                argv.extend(self.args.iter().cloned());
+                argv.extend(self.effective_args(launch));
                 self.common_flags(launch, &mut argv);
                 if launch.bypass {
                     argv.extend(self.bypass_args.iter().cloned());
@@ -113,7 +113,7 @@ impl Agent {
                 if launch.resume.is_some() {
                     argv.push("resume".into());
                 }
-                argv.extend(self.args.iter().cloned());
+                argv.extend(self.effective_args(launch));
                 self.common_flags(launch, &mut argv);
                 if launch.bypass {
                     argv.extend(self.bypass_args.iter().cloned());
@@ -129,7 +129,7 @@ impl Agent {
             }
             AgentKind::Hermes => {
                 argv.push("chat".into());
-                argv.extend(self.args.iter().cloned());
+                argv.extend(self.effective_args(launch));
                 self.common_flags(launch, &mut argv);
                 if launch.bypass {
                     argv.extend(self.bypass_args.iter().cloned());
@@ -137,6 +137,8 @@ impl Agent {
                 if let Some(id) = &launch.resume {
                     argv.extend(pair("--resume", id));
                 }
+                // Hermes restores a resumed session's own folder unless told otherwise.
+                argv.extend(pair("--in", cwd.display().to_string()));
                 if let Some(prompt) = &launch.prompt {
                     argv.push(format!("--query={prompt}"));
                 }
@@ -153,7 +155,7 @@ impl Agent {
                         self.name
                     )));
                 }
-                argv.extend(self.args.iter().cloned());
+                argv.extend(self.effective_args(launch));
             }
         }
         Ok(argv)
@@ -172,7 +174,7 @@ impl Agent {
                 argv.extend(
                     ["-p", "--output-format", "stream-json", "--verbose"].map(String::from),
                 );
-                argv.extend(self.args.iter().cloned());
+                argv.extend(self.effective_args(launch));
                 self.common_flags(launch, &mut argv);
                 argv.extend(permission_args.iter().cloned());
                 if let Some(id) = &launch.resume {
@@ -183,7 +185,7 @@ impl Agent {
             }
             AgentKind::Codex => {
                 argv.extend(["exec", "--json", "--skip-git-repo-check"].map(String::from));
-                argv.extend(self.args.iter().cloned());
+                argv.extend(self.effective_args(launch));
                 self.common_flags(launch, &mut argv);
                 argv.extend(permission_args.iter().cloned());
                 if let Some(id) = &launch.resume {
@@ -193,7 +195,7 @@ impl Agent {
             }
             AgentKind::Hermes => {
                 argv.extend(["chat", "-Q", "--query-file", "-"].map(String::from));
-                argv.extend(self.args.iter().cloned());
+                argv.extend(self.effective_args(launch));
                 self.common_flags(launch, &mut argv);
                 argv.extend(permission_args.iter().cloned());
                 if let Some(id) = &launch.resume {
@@ -209,6 +211,24 @@ impl Agent {
             }
         }
         Ok(argv)
+    }
+
+    /// The configured `args`, minus the model and effort options the launch sets itself (Codex,
+    /// for one, rejects a repeated `-m`).
+    fn effective_args(&self, launch: &Launch) -> Vec<String> {
+        let mut args = self.args.clone();
+        if launch.model.is_some() {
+            args = strip_option(&args, &["--model", "-m"]);
+        }
+        if launch.effort.is_some() {
+            args = match self.kind {
+                AgentKind::Claude => strip_option(&args, &["--effort"]),
+                AgentKind::Hermes => strip_option(&args, &["--reasoning"]),
+                AgentKind::Codex => strip_config(&args, "model_reasoning_effort"),
+                AgentKind::Generic => args,
+            };
+        }
+        args
     }
 
     /// Model and effort flags, which use the same spelling in both modes.
@@ -233,6 +253,38 @@ impl Agent {
             }
         }
     }
+}
+
+/// Removes `name value` and `name=value` occurrences of the given options.
+fn strip_option(args: &[String], names: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if names.contains(&arg.as_str()) {
+            iter.next();
+        } else if !names.iter().any(|n| arg.starts_with(&format!("{n}="))) {
+            out.push(arg.clone());
+        }
+    }
+    out
+}
+
+/// Removes Codex `-c key=…` / `--config key=…` overrides of one key.
+fn strip_config(args: &[String], key: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let prefix = format!("{key}=");
+    for arg in args {
+        if arg.starts_with(&prefix)
+            && out
+                .last()
+                .is_some_and(|prev| prev == "-c" || prev == "--config")
+        {
+            out.pop();
+        } else {
+            out.push(arg.clone());
+        }
+    }
+    out
 }
 
 /// `--settings` value adding a Stop hook that records each finished turn.
@@ -422,7 +474,7 @@ mod tests {
             hook: Some(hook()),
             ..Launch::default()
         };
-        let argv = claude.interactive_argv(&launch).unwrap();
+        let argv = claude.interactive_argv(Path::new("/w"), &launch).unwrap();
         assert_eq!(
             argv[..6],
             [
@@ -475,7 +527,7 @@ mod tests {
             hook: Some(hook()),
             ..Launch::default()
         };
-        let argv = codex.interactive_argv(&launch).unwrap();
+        let argv = codex.interactive_argv(Path::new("/w"), &launch).unwrap();
         assert_eq!(
             argv[..5],
             [
@@ -492,7 +544,7 @@ mod tests {
             prompt: Some("go".into()),
             ..Launch::default()
         };
-        let argv = codex.interactive_argv(&resume).unwrap();
+        let argv = codex.interactive_argv(Path::new("/w"), &resume).unwrap();
         assert_eq!(argv, ["codex", "resume", "-m", "gpt-x", "--", "t-1", "go"]);
 
         let headless = codex
@@ -540,13 +592,19 @@ mod tests {
     fn hermes_and_generic_command_lines() {
         let hermes = agent("hermes");
         let argv = hermes
-            .interactive_argv(&Launch {
-                prompt: Some("-x".into()),
-                bypass: true,
-                ..Launch::default()
-            })
+            .interactive_argv(
+                Path::new("/w"),
+                &Launch {
+                    prompt: Some("-x".into()),
+                    bypass: true,
+                    ..Launch::default()
+                },
+            )
             .unwrap();
-        assert_eq!(argv, ["hermes", "chat", "--yolo", "--query=-x"]);
+        assert_eq!(
+            argv,
+            ["hermes", "chat", "--yolo", "--in", "/w", "--query=-x"]
+        );
         let headless = hermes
             .headless_argv(
                 Path::new("/w"),
@@ -573,15 +631,20 @@ mod tests {
 
         let aider = agent("aider");
         assert_eq!(
-            aider.interactive_argv(&Launch::default()).unwrap(),
+            aider
+                .interactive_argv(Path::new("/w"), &Launch::default())
+                .unwrap(),
             ["aider"]
         );
         assert!(
             aider
-                .interactive_argv(&Launch {
-                    prompt: Some("x".into()),
-                    ..Launch::default()
-                })
+                .interactive_argv(
+                    Path::new("/w"),
+                    &Launch {
+                        prompt: Some("x".into()),
+                        ..Launch::default()
+                    }
+                )
                 .is_err()
         );
         assert!(
@@ -589,6 +652,38 @@ mod tests {
                 .headless_argv(Path::new("/w"), &Launch::default())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn requested_model_and_effort_replace_configured_ones() {
+        let mut codex = agent("codex"); // args = ["-m", "gpt-x"]
+        codex.args.extend([
+            "-c".into(),
+            "model_reasoning_effort=\"xhigh\"".into(),
+            "--search".into(),
+        ]);
+        let launch = Launch {
+            model: Some("gpt-y".into()),
+            effort: Some(Effort::Low),
+            ..Launch::default()
+        };
+        let argv = codex.headless_argv(Path::new("/w"), &launch).unwrap();
+        assert_eq!(argv.iter().filter(|a| *a == "-m").count(), 1, "{argv:?}");
+        assert!(argv.windows(2).any(|w| w == ["-m", "gpt-y"]), "{argv:?}");
+        assert!(!argv.iter().any(|a| a.contains("xhigh")), "{argv:?}");
+        assert!(argv.contains(&"--search".to_string()));
+        let mut claude = agent("claude");
+        claude.args = vec!["--model=opus".into(), "--strict-mcp-config".into()];
+        let argv = claude
+            .interactive_argv(
+                Path::new("/w"),
+                &Launch {
+                    model: Some("haiku".into()),
+                    ..Launch::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(argv, ["claude", "--strict-mcp-config", "--model", "haiku"]);
     }
 
     #[test]

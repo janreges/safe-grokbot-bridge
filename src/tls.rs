@@ -61,7 +61,8 @@ pub fn load_or_create(settings: &TlsSettings, state_dir: &Path, host: &str) -> R
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .context("the TLS certificate and private key do not match")?;
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    // HTTP/1.1 only: nothing here benefits from HTTP/2, and it keeps connection handling simple.
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
     let pin = if self_signed {
         let pem = String::from_utf8_lossy(&key_pem);

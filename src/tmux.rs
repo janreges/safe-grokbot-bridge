@@ -8,7 +8,8 @@ use tokio::process::Command;
 
 use crate::exec;
 
-const FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{session_name}\t#{session_created}\t#{window_activity}\t#{pane_in_mode}\t#{pane_dead}\t#{pane_current_command}\t#{pane_current_path}";
+// `pane_start_command` comes last: it is the only field that may contain tabs.
+const FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{session_name}\t#{session_created}\t#{window_activity}\t#{pane_in_mode}\t#{pane_dead}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_start_command}";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Environment variables that identify the process the bridge itself may run in (a Claude Code
@@ -46,10 +47,53 @@ pub struct Pane {
     pub dead: bool,
     pub command: String,
     pub cwd: PathBuf,
+    /// The command the pane was created with; empty when it runs the default shell.
+    pub start_command: String,
 }
 
+impl Pane {
+    /// Whether the pane dies when its program exits, so nothing else (an interactive shell)
+    /// can receive typed text afterwards: it was created with an explicit command that is not a
+    /// shell.
+    pub fn owned_by_program(&self) -> bool {
+        let first = self
+            .start_command
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c| c == '"' || c == '\'');
+        let name = Path::new(first)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let name = name.trim_end_matches(".exe");
+        !name.is_empty() && !SHELLS.contains(&name)
+    }
+}
+
+const SHELLS: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "dash",
+    "ksh",
+    "mksh",
+    "tcsh",
+    "csh",
+    "nu",
+    "xonsh",
+    "elvish",
+    "pwsh",
+    "powershell",
+    "cmd",
+    "login",
+    "screen",
+    "tmux",
+];
+
 fn parse_pane(line: &str) -> Option<Pane> {
-    let mut parts = line.splitn(9, '\t');
+    let mut parts = line.splitn(10, '\t');
     Some(Pane {
         id: parts.next()?.to_string(),
         pid: parts.next()?.parse().ok()?,
@@ -60,6 +104,7 @@ fn parse_pane(line: &str) -> Option<Pane> {
         dead: parts.next()? == "1",
         command: parts.next()?.to_string(),
         cwd: PathBuf::from(parts.next()?),
+        start_command: parts.next().unwrap_or("").to_string(),
     })
 }
 
@@ -240,7 +285,7 @@ mod tests {
     #[test]
     fn pane_lines_are_parsed() {
         let pane = parse_pane(
-            "%3\t4242\tsgb-app-claude-1a2b3c\t1793315500\t1793315506\t0\t0\tclaude\t/home/me/my app",
+            "%3\t4242\tsgb-app-claude-1a2b3c\t1793315500\t1793315506\t0\t0\tclaude\t/home/me/my app\t/usr/bin/claude --model\topus",
         )
         .unwrap();
         assert_eq!(
@@ -249,6 +294,16 @@ mod tests {
         );
         assert_eq!(pane.cwd, PathBuf::from("/home/me/my app"));
         assert!(!pane.in_mode && !pane.dead);
+        assert_eq!(pane.start_command, "/usr/bin/claude --model\topus");
+        assert!(pane.owned_by_program());
         assert!(parse_pane("garbage").is_none());
+        let shell = |cmd: &str| Pane {
+            start_command: cmd.into(),
+            ..pane.clone()
+        };
+        assert!(!shell("").owned_by_program());
+        assert!(!shell("bash").owned_by_program());
+        assert!(!shell("\"/bin/zsh\" -l").owned_by_program());
+        assert!(shell("\"codex.mnt\"").owned_by_program());
     }
 }

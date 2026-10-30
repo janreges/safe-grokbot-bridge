@@ -34,12 +34,59 @@
         ]
       }
     },
+    "/openapi.json": {
+      "get": {
+        "tags": [
+          "info"
+        ],
+        "summary": "This OpenAPI document.",
+        "operationId": "openapi_document",
+        "responses": {
+          "200": {
+            "description": "The OpenAPI 3.1 document of this API",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/files": {
       "get": {
         "tags": [
           "files"
         ],
-        "summary": "Lists a directory. Entries ignored by `.gitignore` or matching the workspace's deny patterns\n(secrets such as `.env` files and keys) are left out.",
+        "summary": "Lists a directory in path order, page by page. Entries ignored by `.gitignore` or matching\nthe workspace's deny patterns (secrets such as `.env` files and keys) are left out.",
         "operationId": "list_files",
         "parameters": [
           {
@@ -70,6 +117,16 @@
               "type": "integer",
               "minimum": 0
             }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Entries to skip, for the next page (use `next_offset` from the previous response).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         ],
         "responses": {
@@ -92,6 +149,16 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "403": {
             "description": "Outside the workspaces, denied, or `files` not allowed",
             "content": {
@@ -104,6 +171,24 @@
           },
           "404": {
             "description": "The directory does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -173,6 +258,16 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "403": {
             "description": "Outside the workspaces, denied, or `files` not allowed",
             "content": {
@@ -205,6 +300,24 @@
           },
           "415": {
             "description": "Binary file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -281,8 +394,36 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "403": {
             "description": "Outside the workspaces or `git` not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -360,8 +501,36 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "403": {
             "description": "Outside the workspaces or `git` not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -429,8 +598,36 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "403": {
             "description": "Outside the workspaces or `git` not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -480,8 +677,36 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "403": {
             "description": "Outside the workspaces or `git` not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -512,6 +737,24 @@
           },
           "401": {
             "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -551,8 +794,36 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "403": {
             "description": "`path` is outside the workspaces",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -592,6 +863,16 @@
           },
           "400": {
             "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
             "content": {
               "application/json": {
                 "schema": {
@@ -702,8 +983,36 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "No such session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -742,6 +1051,16 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "403": {
             "description": "`input` not allowed in this folder",
             "content": {
@@ -764,6 +1083,24 @@
           },
           "409": {
             "description": "Not started by the bridge",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -824,6 +1161,16 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "403": {
             "description": "`input` not allowed in this folder",
             "content": {
@@ -846,6 +1193,24 @@
           },
           "409": {
             "description": "Busy, ended, or not controllable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1058,6 +1423,7 @@
           "path",
           "entries",
           "truncated",
+          "offset",
           "depth",
           "limit",
           "unreadable"
@@ -1080,12 +1446,25 @@
             "description": "Maximum entries returned (the requested `limit`, capped at 2000).",
             "minimum": 0
           },
+          "next_offset": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Pass this as `offset` to get the next entries (present when `truncated`).",
+            "minimum": 0
+          },
           "note": {
             "type": [
               "string",
               "null"
             ],
             "description": "Explains an empty, truncated or incomplete listing."
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Entries skipped before this page.",
+            "minimum": 0
           },
           "path": {
             "type": "string",
@@ -1350,7 +1729,7 @@
               "string",
               "null"
             ],
-            "description": "The agent's last completed answer; while a headless turn runs, its latest message."
+            "description": "The agent's last answer. A headless session clears it when a new message is sent and\nshows the newest progress message while the turn runs."
           },
           "last_message_at": {
             "type": [
@@ -1476,14 +1855,14 @@
               "boolean",
               "null"
             ],
-            "description": "`true` (default) keeps the session after it answers. `false` closes it once the first\nanswer is in; the answer stays readable in `last_message`."
+            "description": "`true` (default) keeps the session after it answers. `false` closes it once the first\nanswer is in; the answer stays readable in `last_message`. In tmux this needs an agent\nthat reports finished turns (Claude Code, Codex)."
           },
           "model": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Model, passed with the agent's model flag (e.g. `opus`, `gpt-6.1-sol`)."
+            "description": "Model, passed with the agent's model flag (e.g. `opus`, `gpt-6.1-sol`). Replaces a model\nset in the agent's configured `args`."
           },
           "prompt": {
             "type": [
@@ -1497,7 +1876,7 @@
               "string",
               "null"
             ],
-            "description": "Continue an earlier conversation: the agent's session id (`agent_session_id`)."
+            "description": "Continue an earlier conversation held in this same folder: the agent's session id\n(`agent_session_id`)."
           },
           "runner": {
             "oneOf": [
@@ -1586,7 +1965,7 @@
   "tags": [
     {
       "name": "info",
-      "description": "Machine overview"
+      "description": "Machine overview and this API's description"
     },
     {
       "name": "files",
