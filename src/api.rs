@@ -373,7 +373,7 @@ async fn info(State(app): State<AppState>) -> Json<Info> {
             .map(|agent| AgentInfo {
                 name: agent.name.clone(),
                 kind: agent.kind,
-                available: exec::which(&agent.command).is_some(),
+                available: exec::which_with(&agent.command, &agent.env).is_some(),
                 headless: agent.kind != AgentKind::Generic,
             })
             .collect(),

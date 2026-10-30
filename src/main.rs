@@ -242,7 +242,7 @@ fn check(path: &Path) -> Result<()> {
     println!("Agents");
     let mut available = 0;
     for agent in &config.agents {
-        match exec::which(&agent.command) {
+        match exec::which_with(&agent.command, &agent.env) {
             Some(found) => {
                 available += 1;
                 println!(

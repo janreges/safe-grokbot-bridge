@@ -58,7 +58,7 @@ async fn run_turn(
     let argv = agent
         .headless_argv(&record.cwd, launch)
         .map_err(|e| e.message)?;
-    let program = exec::which(&argv[0]).ok_or_else(|| {
+    let program = exec::which_with(&argv[0], &agent.env).ok_or_else(|| {
         format!(
             "`{}` was not found on the bridge's PATH. Only the machine's owner can install it or set an absolute `command` for agent `{}`.",
             argv[0], agent.name

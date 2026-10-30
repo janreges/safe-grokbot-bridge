@@ -414,11 +414,9 @@ impl Sessions {
         let mut found: Vec<ClaudeAgent> = Vec::new();
         let mut errors = Vec::new();
         let mut dirs = Vec::new();
-        let profiles = self
-            .config
-            .agents
-            .iter()
-            .filter(|a| a.kind == AgentKind::Claude && exec::which(&a.command).is_some());
+        let profiles = self.config.agents.iter().filter(|a| {
+            a.kind == AgentKind::Claude && exec::which_with(&a.command, &a.env).is_some()
+        });
         // Profiles are queried at once, so a listing takes at most one query's timeout.
         let mut queries = tokio::task::JoinSet::new();
         for (index, agent) in profiles.enumerate() {
@@ -1838,7 +1836,7 @@ pub fn new_session_name(cwd: &Path, agent: &str) -> String {
 
 /// The absolute path of an agent's program, so tmux does not depend on its own `PATH`.
 pub fn resolve_program(program: &str, agent: &Agent) -> Result<String, ApiError> {
-    exec::which(program)
+    exec::which_with(program, &agent.env)
         .map(|p| p.display().to_string())
         .ok_or_else(|| {
             ApiError::unavailable(format!(

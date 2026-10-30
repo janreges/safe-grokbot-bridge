@@ -110,6 +110,18 @@ pub async fn read_capped(
 /// Finds a program the way a shell would: a path with a separator is used as is, a bare name is
 /// looked up on `PATH` (with `PATHEXT` extensions on Windows).
 pub fn which(program: &str) -> Option<PathBuf> {
+    find_in(program, &std::env::var_os("PATH")?)
+}
+
+/// Like [`which`], but searches the `PATH` that `env` (an agent's configured environment) sets.
+pub fn which_with(program: &str, env: &[(String, String)]) -> Option<PathBuf> {
+    match env.iter().find(|(key, _)| key == "PATH") {
+        Some((_, path)) => find_in(program, std::ffi::OsStr::new(path)),
+        None => which(program),
+    }
+}
+
+fn find_in(program: &str, search: &std::ffi::OsStr) -> Option<PathBuf> {
     let path = Path::new(program);
     if path.components().count() > 1 {
         return is_executable(path).then(|| path.to_path_buf());
@@ -124,7 +136,7 @@ pub fn which(program: &str) -> Option<PathBuf> {
     } else {
         Vec::new()
     };
-    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| {
+    std::env::split_paths(search).find_map(|dir| {
         let candidate = dir.join(program);
         if is_executable(&candidate) {
             return Some(candidate);
