@@ -11,7 +11,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Publish only what passes the checks, from a tag that matches the crate version.
+  # Publish only from a tag that matches the crate version, and only what passes the full CI
+  # (lint, tests on Linux, macOS and Windows, MSRV).
   verify:
     runs-on: ubuntu-latest
     steps:
@@ -20,18 +21,12 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != v$version"; exit 1; }
-      - run: sudo apt-get update && sudo apt-get install -y tmux
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
-        env:
-          SGB_REQUIRE_TMUX: "1"
+
+  checks:
+    uses: ./.github/workflows/ci.yml
 
   build:
-    needs: verify
+    needs: [verify, checks]
     strategy:
       fail-fast: false
       matrix:
