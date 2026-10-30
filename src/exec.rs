@@ -129,10 +129,13 @@ pub fn which_with(program: &str, env: &[(String, String)]) -> Option<PathBuf> {
     }
 }
 
+/// Always an absolute path: the program is started in another folder (the session's), where a
+/// relative path would name a different file, possibly one from the project itself.
 fn find_in(program: &str, search: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     let path = Path::new(program);
     if path.components().count() > 1 {
-        return is_executable(path).then(|| path.to_path_buf());
+        let path = std::path::absolute(path).ok()?;
+        return is_executable(&path).then_some(path);
     }
     let search = search?;
     let extensions: Vec<String> = if cfg!(windows) {
@@ -145,16 +148,19 @@ fn find_in(program: &str, search: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     } else {
         Vec::new()
     };
-    std::env::split_paths(search).find_map(|dir| {
-        let candidate = dir.join(program);
-        if is_executable(&candidate) {
-            return Some(candidate);
-        }
-        extensions
-            .iter()
-            .map(|ext| dir.join(format!("{program}{ext}")))
-            .find(|candidate| candidate.is_file())
-    })
+    // Relative entries (`.`, `bin`) would be resolved against the session's folder later.
+    std::env::split_paths(search)
+        .filter(|dir| dir.is_absolute())
+        .find_map(|dir| {
+            let candidate = dir.join(program);
+            if is_executable(&candidate) {
+                return Some(candidate);
+            }
+            extensions
+                .iter()
+                .map(|ext| dir.join(format!("{program}{ext}")))
+                .find(|candidate| candidate.is_file())
+        })
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -180,5 +186,13 @@ mod tests {
         assert_eq!(find_in("sh", None), None);
         let dirs = std::ffi::OsString::from("/nonexistent:/bin");
         assert_eq!(find_in("sh", Some(&dirs)), Some(PathBuf::from("/bin/sh")));
+        // Relative names become absolute; relative search folders are skipped.
+        let up = "../".repeat(std::env::current_dir().unwrap().components().count() - 1);
+        let found = find_in(&format!("{up}bin/sh"), None).unwrap();
+        assert!(found.is_absolute() && is_executable(&found), "{found:?}");
+        assert_eq!(
+            find_in("sh", Some(&std::ffi::OsString::from("bin:."))),
+            None
+        );
     }
 }
