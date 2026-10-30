@@ -1780,61 +1780,13 @@ impl Sessions {
                 self.run_turn(&record, text.clone().unwrap_or_default())?;
             }
             Runner::Tmux => {
-                let tmux = self
-                    .tmux
-                    .as_ref()
-                    .ok_or_else(|| ApiError::unavailable("tmux is not available."))?;
-                let _typing = self.tmux_input.lock().await;
-                // Another request may have typed meanwhile, and the pane may have changed: look
-                // the session up again now that it is this request's turn.
-                let session = self.find(id).await?;
-                if matches!(session.state, SessionState::Finished | SessionState::Exited) {
-                    return Err(ended(id));
-                }
-                if session.runner != Runner::Tmux || session.native || !session.controllable {
-                    return Err(not_controllable(&session));
-                }
-                let target = session
-                    .target
-                    .clone()
-                    .ok_or_else(|| ApiError::internal("missing tmux target"))?;
-                let pid = session.pane_pid;
-                let record = self.record(id);
-                if let Some(text) = &text {
-                    let submit = request.submit.unwrap_or(true);
-                    // A submitted message starts a turn; record it before submitting, so that the
-                    // turn's completion event is always later. A draft starts nothing.
-                    let previous = match (&record, submit) {
-                        (Some(record), true) => {
-                            let mut state = record.state();
-                            state.sent.push(text.clone());
-                            if state.sent.len() > 10 {
-                                state.sent.remove(0);
-                            }
-                            Some(state.last_input_ms.replace(unix_now_ms()))
-                        }
-                        _ => None,
-                    };
-                    if let Err(err) = paste_and_submit(tmux, &target, pid, text, submit).await {
-                        if let (Some(record), Some(previous)) = (&record, previous) {
-                            record.state().last_input_ms = previous;
-                        }
-                        return Err(err);
-                    }
-                    if let Some(record) = &record {
-                        self.save_meta(record);
-                    }
-                }
-                for key in &keys {
-                    // Before every key: the pane may change between them.
-                    check_pane(tmux, &target, pid).await?;
-                    let sent = if KEYS.contains(&key.as_str()) {
-                        tmux.send_keys(&target, &[key]).await
-                    } else {
-                        tmux.send_literal(&target, key).await
-                    };
-                    sent.map_err(|err| ApiError::internal(format!("{err:#}")))?;
-                }
+                // Typing runs in its own task, so that a client that hangs up halfway leaves no
+                // pasted text waiting for its Enter.
+                let submit = request.submit.unwrap_or(true);
+                let typing =
+                    self.clone()
+                        .type_into(id.to_string(), text.clone(), keys.clone(), submit);
+                tokio::spawn(typing).await.map_err(ApiError::internal)??;
             }
             Runner::External => {
                 if !keys.is_empty() {
@@ -1861,6 +1813,72 @@ impl Sessions {
         );
         tokio::time::sleep(Duration::from_millis(300)).await;
         self.find(id).await
+    }
+
+    /// Types text (a bracketed paste, then Enter unless it is a draft) and keys into a tmux
+    /// session's pane, one request at a time.
+    async fn type_into(
+        self: Arc<Self>,
+        id: String,
+        text: Option<String>,
+        keys: Vec<String>,
+        submit: bool,
+    ) -> Result<(), ApiError> {
+        let tmux = self
+            .tmux
+            .as_ref()
+            .ok_or_else(|| ApiError::unavailable("tmux is not available."))?;
+        let _typing = self.tmux_input.lock().await;
+        // Another request may have typed meanwhile, and the pane may have changed: look the
+        // session up again now that it is this request's turn.
+        let session = self.find(&id).await?;
+        if matches!(session.state, SessionState::Finished | SessionState::Exited) {
+            return Err(ended(&id));
+        }
+        if session.runner != Runner::Tmux || session.native || !session.controllable {
+            return Err(not_controllable(&session));
+        }
+        let target = session
+            .target
+            .clone()
+            .ok_or_else(|| ApiError::internal("missing tmux target"))?;
+        let pid = session.pane_pid;
+        let record = self.record(&id);
+        if let Some(text) = &text {
+            // A submitted message starts a turn; record it before submitting, so that the turn's
+            // completion event is always later. A draft starts nothing.
+            let previous = match (&record, submit) {
+                (Some(record), true) => {
+                    let mut state = record.state();
+                    state.sent.push(text.clone());
+                    if state.sent.len() > 10 {
+                        state.sent.remove(0);
+                    }
+                    Some(state.last_input_ms.replace(unix_now_ms()))
+                }
+                _ => None,
+            };
+            if let Err(err) = paste_and_submit(tmux, &target, pid, text, submit).await {
+                if let (Some(record), Some(previous)) = (&record, previous) {
+                    record.state().last_input_ms = previous;
+                }
+                return Err(err);
+            }
+            if let Some(record) = &record {
+                self.save_meta(record);
+            }
+        }
+        for key in &keys {
+            // Before every key: the pane may change between them.
+            check_pane(tmux, &target, pid).await?;
+            let sent = if KEYS.contains(&key.as_str()) {
+                tmux.send_keys(&target, &[key]).await
+            } else {
+                tmux.send_literal(&target, key).await
+            };
+            sent.map_err(|err| ApiError::internal(format!("{err:#}")))?;
+        }
+        Ok(())
     }
 
     async fn send_external(&self, session: &Session, text: &str) -> Result<(), ApiError> {
