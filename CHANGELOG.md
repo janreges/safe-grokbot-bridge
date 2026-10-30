@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-30
+
 ### Added
 
 - A skill for Grok Bot and other clients, `safe-grokbot-bridge-client`. Besides using the API,
@@ -147,7 +149,8 @@ All notable changes to this project are documented in this file. The format is b
 - Release archives for Linux (x86_64, aarch64), macOS (Apple silicon, Intel) and Windows, with
   SHA-256 checksums.
 
-[Unreleased]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/janreges/safe-grokbot-bridge/releases/tag/v0.1.0

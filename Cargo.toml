@@ -1,6 +1,6 @@
 [package]
 name = "safe-grokbot-bridge"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 description = "A secure HTTP bridge that lets a remote AI agent such as Grok Bot read your projects and drive Claude Code, Codex and Hermes sessions on your machines"
