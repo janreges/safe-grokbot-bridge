@@ -1,6 +1,5 @@
 //! Read-only git commands with fixed, hardened options.
 
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -354,8 +353,9 @@ pub async fn repository(dir: &Path) -> Result<Repository, ApiError> {
                 toplevel.display()
             )));
         }
-        for line in read_alternates(&objects.join("info").join("alternates")).lines() {
-            let line = line.trim();
+        let alternates = read_alternates(&objects.join("info").join("alternates"), &toplevel)?;
+        // Git takes every line as it is: a path, a comment (`#`) or a C-quoted path.
+        for line in alternates.lines() {
             if line.starts_with('"') {
                 return Err(ApiError::forbidden(format!(
                     "The repository at {} uses a quoted object alternate, which the bridge cannot verify, so git access is refused.",
@@ -371,14 +371,24 @@ pub async fn repository(dir: &Path) -> Result<Repository, ApiError> {
     Ok(Repository { toplevel, storage })
 }
 
-fn read_alternates(path: &Path) -> String {
-    let mut text = String::new();
-    if path.is_file()
-        && let Ok(file) = std::fs::File::open(path)
-    {
-        let _ = file.take(64 * 1024).read_to_string(&mut text);
+/// A repository's list of object alternates, read completely or not at all: an entry the bridge
+/// did not see would still be used by git.
+fn read_alternates(path: &Path, toplevel: &Path) -> Result<String, ApiError> {
+    let refuse = |why: String| {
+        ApiError::forbidden(format!(
+            "The object alternates of the repository at {} {why}, so git access is refused.",
+            toplevel.display()
+        ))
+    };
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(err) => return Err(refuse(format!("cannot be read ({err})"))),
+    };
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        return Err(refuse("are not a regular file of at most 1 MiB".into()));
     }
-    text
+    std::fs::read_to_string(path).map_err(|err| refuse(format!("cannot be read ({err})")))
 }
 
 #[cfg(test)]
@@ -608,11 +618,19 @@ mod tests {
             &root,
             &["clone", "-q", "--shared", src.to_str().unwrap(), "borrowed"],
         );
-        let repo = repository(&root.join("borrowed")).await.unwrap();
+        let borrowed = root.join("borrowed");
+        let repo = repository(&borrowed).await.unwrap();
         assert!(
             repo.storage.contains(&gitdir.join("objects")),
             "{:?}",
             repo.storage
         );
+        // An alternate listed after a long run of other entries is still found.
+        let alternates = borrowed.join(".git/objects/info/alternates");
+        let padding = format!("{}\n", src.join(".git/objects").display()).repeat(5000);
+        let private = root.join("partial/.git/objects");
+        std::fs::write(&alternates, format!("{padding}{}\n", private.display())).unwrap();
+        let repo = repository(&borrowed).await.unwrap();
+        assert!(repo.storage.contains(&private), "{:?}", repo.storage);
     }
 }
