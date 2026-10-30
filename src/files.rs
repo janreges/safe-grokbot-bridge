@@ -244,7 +244,13 @@ pub fn read(
     if ws.is_denied(rel) {
         return Err(denied(path));
     }
-    let metadata = std::fs::metadata(path).map_err(ApiError::internal)?;
+    let metadata = std::fs::metadata(path).map_err(|err| match err.kind() {
+        // Removed since the path was resolved.
+        std::io::ErrorKind::NotFound => {
+            ApiError::not_found(format!("`{}` does not exist.", path.display()))
+        }
+        _ => ApiError::internal(format!("cannot read `{}`: {err}", path.display())),
+    })?;
     if metadata.is_dir() {
         return Err(ApiError::bad_request(format!(
             "`{}` is a directory. List it with GET /v1/files.",
