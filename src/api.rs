@@ -707,7 +707,7 @@ async fn list_sessions(
     (status = 404, description = "`cwd` does not exist", body = ErrorBody),
     (status = 409, description = "The conversation to resume is open elsewhere", body = ErrorBody),
     (status = 429, description = "Too many running sessions", body = ErrorBody),
-    (status = 502, description = "The agent exited right after starting", body = ErrorBody),
+    (status = 502, description = "The agent exited right after starting (`agent_exited`), or tmux could not start the session (`tmux_failed`)", body = ErrorBody),
     (status = 503, description = "The agent or tmux is not installed", body = ErrorBody),
 ))]
 async fn start_session(

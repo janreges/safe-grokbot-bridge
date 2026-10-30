@@ -80,13 +80,16 @@ impl ApiError {
         }
     }
 
-    /// An unexpected failure. Details go to the log; the client gets a short summary.
+    /// An unexpected failure. The client gets the cause as well: it is the agent of the
+    /// machine's owner, and the cause is what tells the owner what to fix.
     pub fn internal(err: impl std::fmt::Display) -> Self {
         tracing::error!("internal error: {err}");
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",
-            format!("Internal error: {err}"),
+            format!(
+                "Internal error on the machine: {err}. Repeating the request will probably fail the same way; tell the machine's owner, who finds the details in the bridge's log."
+            ),
         )
     }
 }

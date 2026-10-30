@@ -1485,7 +1485,16 @@ impl Sessions {
         let pane = tmux
             .new_session(&record.id, &record.cwd, &record.agent.env, &argv)
             .await
-            .map_err(|err| ApiError::internal(format!("cannot start the tmux session: {err:#}")))?;
+            .map_err(|err| {
+                tracing::warn!(id = record.id, "tmux could not start the session: {err:#}");
+                ApiError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "tmux_failed",
+                    format!(
+                        "tmux could not start the session ({err:#}). Start it with `runner: \"headless\"` instead, and tell the machine's owner to check tmux."
+                    ),
+                )
+            })?;
         let stopped = {
             let mut state = record.state();
             state.pane = Some(pane.id.clone());

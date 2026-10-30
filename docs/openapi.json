@@ -1178,7 +1178,7 @@
             }
           },
           "502": {
-            "description": "The agent exited right after starting",
+            "description": "The agent exited right after starting (`agent_exited`), or tmux could not start the session (`tmux_failed`)",
             "content": {
               "application/json": {
                 "schema": {
