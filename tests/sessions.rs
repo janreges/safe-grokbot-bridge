@@ -410,6 +410,33 @@ async fn tmux_sessions_take_text_and_keys_and_ignore_other_panes() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
+    // With `synchronize-panes` on, tmux would copy typed keys to the shell next to the agent.
+    let window = format!("={id}:");
+    tmux(&[
+        "set-window-option",
+        "-t",
+        &window,
+        "synchronize-panes",
+        "on",
+    ]);
+    let (status, body) = h
+        .post(&format!("/v1/sessions/{id}/input"), json!({"keys": ["x"]}))
+        .await;
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (StatusCode::CONFLICT, Some("not_controllable")),
+        "{body}"
+    );
+    let (_, session) = h.get(&format!("/v1/sessions/{id}")).await;
+    assert_eq!(session["controllable"], false, "{session}");
+    tmux(&[
+        "set-window-option",
+        "-t",
+        &window,
+        "synchronize-panes",
+        "off",
+    ]);
+
     let (_, list) = h.get("/v1/sessions").await;
     let ids: Vec<&str> = list["sessions"]
         .as_array()

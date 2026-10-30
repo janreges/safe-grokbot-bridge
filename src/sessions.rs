@@ -838,17 +838,9 @@ impl Sessions {
             .zip(claude_dir.as_deref())
             .and_then(|(pid, dir)| external::claude_inbox(dir, pid));
         let native = experimental && (inbox.is_some() || codex.is_some_and(|t| !t.ambiguous));
-        // psmux addresses a session's active pane, not a pane id, so a session with several panes
-        // could route text to the wrong one.
-        let alone = !cfg!(windows)
-            || ctx
-                .panes
-                .iter()
-                .filter(|p| p.session == pane.session)
-                .count()
-                == 1;
+        let blocked = typing_reaches_others(&ctx.panes, pane);
         session.controllable =
-            ws.allows(Capability::Input) && !pane.dead && ((owned && alone) || native);
+            ws.allows(Capability::Input) && !pane.dead && ((owned && blocked.is_none()) || native);
         session.native = native;
         session.pane_pid = Some(pane.pid);
         session.last_activity_at = (pane.activity > 0).then(|| rfc3339(unix_time(pane.activity)));
@@ -917,8 +909,8 @@ impl Sessions {
         session.state = derived.state;
         session.waiting_for = derived.waiting_for;
         let mut notes = Vec::new();
-        if !alone && !native {
-            notes.push("This tmux session has several panes, and on Windows the bridge cannot address one of them reliably, so it does not type into it. Close the other panes to make it controllable.");
+        if let Some(reason) = blocked.filter(|_| owned && !native) {
+            notes.push(reason);
         }
         if native {
             notes.push("Experimental: this agent runs inside an interactive shell, so the bridge does not type into its terminal and delivers `text` through the agent's own messaging instead (Claude Code inbox, `codex queue`); `keys` are not supported.");
@@ -1779,10 +1771,9 @@ impl Sessions {
                         self.save_meta(record);
                     }
                 }
-                if !keys.is_empty() {
-                    check_pane(tmux, &target, pid).await?;
-                }
                 for key in &keys {
+                    // Before every key: the pane may change between them.
+                    check_pane(tmux, &target, pid).await?;
                     let sent = if KEYS.contains(&key.as_str()) {
                         tmux.send_keys(&target, &[key]).await
                     } else {
@@ -2244,6 +2235,28 @@ pub fn sanitize(text: &str) -> String {
         .collect()
 }
 
+/// Why keys sent to `pane` could also reach another pane, if they could: `synchronize-panes`
+/// copies them to the window's other panes, and psmux addresses a session's active pane.
+fn typing_reaches_others(panes: &[Pane], pane: &Pane) -> Option<&'static str> {
+    let sibling = |p: &&Pane| p.session == pane.session && p.id != pane.id;
+    if pane.synchronized
+        && panes
+            .iter()
+            .filter(sibling)
+            .any(|p| p.window == pane.window)
+    {
+        return Some(
+            "`synchronize-panes` is on in this pane's window, so whatever the bridge typed would also reach the window's other panes; it does not type into it. Ask the machine's owner to turn it off (`tmux set-window-option synchronize-panes off`) or to close the other panes.",
+        );
+    }
+    if cfg!(windows) && panes.iter().any(|p| sibling(&p)) {
+        return Some(
+            "This tmux session has several panes, and on Windows the bridge cannot address one of them reliably, so it does not type into it. Close the other panes to make it controllable.",
+        );
+    }
+    None
+}
+
 /// Fails unless the pane still runs `pid`, the process it was authorized with. Checked right
 /// before typing, because a pane can be respawned with another program, such as a shell, at any
 /// time.
@@ -2257,12 +2270,14 @@ async fn check_pane(tmux: &Tmux, target: &str, pid: Option<u32>) -> Result<Pane,
         .find(|p| p.id == target || tmux::session_target(&p.session) == target)
         .cloned()
         .ok_or_else(|| ApiError::conflict("ended", "The session's tmux pane is gone."))?;
-    let crowded = cfg!(windows) && panes.iter().filter(|p| p.session == pane.session).count() > 1;
-    if pid.is_some_and(|pid| pid != pane.pid) || pane.dead || crowded {
+    if pid.is_some_and(|pid| pid != pane.pid) || pane.dead {
         return Err(ApiError::conflict(
             "not_controllable",
             "The session's pane no longer runs the agent it was started with, so the bridge does not type into it.",
         ));
+    }
+    if let Some(reason) = typing_reaches_others(&panes, &pane) {
+        return Err(ApiError::conflict("not_controllable", reason));
     }
     Ok(pane)
 }
@@ -2330,6 +2345,8 @@ mod tests {
             activity,
             in_mode: false,
             dead: false,
+            window: "@1".into(),
+            synchronized: false,
             command: "x".into(),
             cwd: PathBuf::from("/"),
         }
