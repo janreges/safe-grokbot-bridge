@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-30
+
 ### Added
 
 - An agent skill, `safe-grokbot-bridge`, that lets Claude Code, Codex and other coding agents
@@ -14,10 +16,34 @@ All notable changes to this project are documented in this file. The format is b
   repository is a plugin marketplace for Claude Code and Codex, and `npx skills add` installs
   the skill for other agents. Release archives contain it too.
 
+### Changed
+
+- Waiting for a session costs far less CPU: a long-poll looks every 2 s instead of every
+  second, `claude agents --json` is cached for 5 s and runs only for listings and Claude
+  sessions, and a headless session is read from its record alone.
+- A tmux session that cannot be created is answered with 502 `tmux_failed` and a hint to use
+  the headless runner, instead of an internal error. Internal errors say that repeating the
+  request will not help and where the details are logged.
+- The bridge logs a warning once when `client_ip_header` holds something other than a single
+  address, such as an `X-Forwarded-For` list.
+- Only the release job of the release workflow may write to the repository.
+- Hermes Agent 0.21.1 has passed the same checks against the real CLI as Claude Code and Codex.
+
 ### Fixed
 
+- Stopping the bridge behind a Cloudflare Tunnel no longer waits for open long-polls: requests
+  get 10 s, then the bridge stops its headless turns.
+- Typing into a tmux session completes even when the client hangs up between the paste and
+  `Enter`.
+- Sessions start in tmux also in a folder whose name ends in `;`.
+- A file deleted while it is read is answered with 404 instead of 500.
 - The Windows instructions say to clear Task Scheduler's *Stop the task if it runs longer than*,
   whose default of 3 days would stop the bridge.
+- The Grok Bot skill's `sgb` helper works with machine names that contain `-`.
+- The systemd units in the guides wait 5 s between restarts instead of giving up after a burst
+  of failures.
+- Documentation: `--token-file` needs cloudflared 2025.4.0, the state folder keeps the texts
+  recently sent to tmux sessions, and several smaller corrections.
 
 ## [0.1.1] - 2026-10-30
 
@@ -92,6 +118,7 @@ All notable changes to this project are documented in this file. The format is b
 - Release archives for Linux (x86_64, aarch64), macOS (Apple silicon, Intel) and Windows, with
   SHA-256 checksums.
 
-[Unreleased]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/janreges/safe-grokbot-bridge/releases/tag/v0.1.0
