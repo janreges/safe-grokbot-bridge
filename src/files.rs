@@ -326,8 +326,8 @@ fn open_checked(path: &Path) -> Result<File, ApiError> {
     Ok(file)
 }
 
-/// Whether an open file is the one at `path` now. Linux reports a handle's real path; elsewhere
-/// the path is resolved again and compared with the handle's identity.
+/// Whether an open file is the one at `path`. Linux and Windows report the real path of a
+/// handle; elsewhere the path is resolved again and compared with the handle's identity.
 fn opened_as(file: &File, metadata: &std::fs::Metadata, path: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -336,22 +336,53 @@ fn opened_as(file: &File, metadata: &std::fs::Metadata, path: &Path) -> bool {
         std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
             .is_ok_and(|real| real == path)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
     {
+        let _ = metadata;
+        handle_path(file).is_some_and(|real| real == path)
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        use std::os::unix::fs::MetadataExt;
         let _ = file;
         let Ok(now) = std::fs::metadata(path) else {
             return false;
         };
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if (now.dev(), now.ino()) != (metadata.dev(), metadata.ino()) {
-                return false;
-            }
+        (now.dev(), now.ino()) == (metadata.dev(), metadata.ino())
+            && dunce::canonicalize(path).is_ok_and(|real| real == path)
+    }
+}
+
+/// The final path of an open file, as `dunce::canonicalize` would report it.
+#[cfg(windows)]
+fn handle_path(file: &File) -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW, VOLUME_NAME_DOS,
+    };
+    let mut buffer = vec![0u16; 1024];
+    loop {
+        // SAFETY: the handle stays open while `file` lives, and the call writes at most
+        // `buffer.len()` UTF-16 units into the buffer.
+        let len = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle(),
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+            )
+        } as usize;
+        if len == 0 {
+            return None;
         }
-        #[cfg(not(unix))]
-        let _ = (now, metadata);
-        dunce::canonicalize(path).is_ok_and(|real| real == path)
+        if len < buffer.len() {
+            buffer.truncate(len);
+            let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer));
+            return Some(dunce::simplified(&path).to_path_buf());
+        }
+        // The buffer was too small; `len` is the size needed, including the final NUL.
+        buffer.resize(len, 0);
     }
 }
 
