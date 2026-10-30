@@ -117,6 +117,7 @@ async fn serve_tls(listener: TcpListener, router: Router, config: Arc<rustls::Se
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let per_ip: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::default();
+    let mut dropped = DropLog::default();
     let mut shutdown = std::pin::pin!(shutdown_signal());
     loop {
         let (tcp, peer) = tokio::select! {
@@ -131,11 +132,11 @@ async fn serve_tls(listener: TcpListener, router: Router, config: Arc<rustls::Se
             _ = &mut shutdown => break,
         };
         let Some(slot) = IpSlot::take(&per_ip, peer.ip()) else {
-            tracing::warn!(%peer, "too many connections from this address; dropping connection");
+            dropped.record(peer, "too many connections from one address");
             continue;
         };
         let Ok(permit) = permits.clone().try_acquire_owned() else {
-            tracing::warn!(%peer, "connection limit reached; dropping connection");
+            dropped.record(peer, "connection limit reached");
             continue;
         };
         let acceptor = acceptor.clone();
@@ -187,6 +188,32 @@ async fn serve_tls(listener: TcpListener, router: Router, config: Arc<rustls::Se
 }
 
 /// One of the connections a client address may hold; released on drop.
+/// Logs dropped connections at most once a minute, with their number, so a client that keeps
+/// opening connections cannot flood the log.
+#[derive(Default)]
+struct DropLog {
+    last: Option<Instant>,
+    dropped: u64,
+}
+
+impl DropLog {
+    fn record(&mut self, peer: SocketAddr, reason: &str) {
+        self.dropped += 1;
+        if self
+            .last
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
+        {
+            tracing::warn!(
+                %peer,
+                dropped = self.dropped,
+                "{reason}; dropping connections (logged at most once a minute)"
+            );
+            self.last = Some(Instant::now());
+            self.dropped = 0;
+        }
+    }
+}
+
 struct IpSlot {
     map: Arc<Mutex<HashMap<IpAddr, usize>>>,
     ip: IpAddr,
