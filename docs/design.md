@@ -539,6 +539,9 @@ Focus on behaviour that would hurt if it broke:
   transcripts, Codex rollouts, using fixtures;
 - integration: the in-process router with temporary workspaces and git repos; the tmux and
   headless runners driven end to end with fake agent scripts (Unix only, skipped without tmux);
+- the real binary: TLS with the pinned key and the handshake timeout, turn hooks of Claude Code
+  and Codex through `safe-grokbot-bridge hook`, closing one-shot sessions, and taking over tmux
+  sessions after a restart;
 - TLS: certificate generation and pin computation.
 
 CI runs `fmt`, `clippy -D warnings` and the tests on Linux, macOS and Windows.
