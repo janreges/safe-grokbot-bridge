@@ -32,6 +32,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const FIRST_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(150);
+/// How long open requests may still run after a stop signal. Long-polls are cut short then.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
 pub struct App {
     pub config: Arc<Config>,
@@ -85,13 +87,25 @@ pub async fn run(config: Config) -> Result<()> {
     match tls {
         None => {
             tracing::info!("safe-grokbot-bridge {version} listening on http://{listen}");
-            axum::serve(
+            // Open requests, such as long-polls, get the same grace period as on TLS, so that a
+            // stop finishes in time to end the headless turns below.
+            let stopping = Arc::new(tokio::sync::Notify::new());
+            let notify = stopping.clone();
+            let server = axum::serve(
                 listener,
                 router.into_make_service_with_connect_info::<SocketAddr>(),
             )
-            .with_graceful_shutdown(shutdown_signal())
-            .await
-            .context("HTTP server failed")?;
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                notify.notify_one();
+            });
+            tokio::select! {
+                result = async { server.await } => result.context("HTTP server failed")?,
+                () = async {
+                    stopping.notified().await;
+                    tokio::time::sleep(SHUTDOWN_GRACE).await;
+                } => tracing::warn!("closing with requests still open"),
+            }
         }
         Some(tls) => {
             tracing::info!("safe-grokbot-bridge {version} listening on https://{listen}");
@@ -185,7 +199,7 @@ async fn serve_tls(listener: TcpListener, router: Router, config: Arc<rustls::Se
     drop(listener);
     tokio::select! {
         _ = graceful.shutdown() => {}
-        _ = tokio::time::sleep(Duration::from_secs(10)) => {
+        _ = tokio::time::sleep(SHUTDOWN_GRACE) => {
             tracing::warn!("closing with connections still open");
         }
     }

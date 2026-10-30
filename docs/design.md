@@ -560,6 +560,9 @@ Not checked by hand: native Windows with psmux, and macOS.
 ## 12. Operational notes
 
 - Run the bridge as the same OS user that runs the agents and owns the tmux server.
+- When the bridge stops, open requests get 10 s to finish (long-polls are cut short), then it
+  stops its headless turns. A stop therefore takes about 10 s at most, well within systemd's
+  default timeout.
 - Under systemd, give the bridge's unit `KillMode=process`. A tmux server the bridge started runs
   in the unit's control group, and by default stopping the unit would end it with every session.
   The bridge stops its own headless turns when it stops.
