@@ -126,7 +126,7 @@ required.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `external_sessions` | `false` | Let clients message agent sessions running **outside** tmux. Claude Code sessions get messages through their inbox socket, Codex sessions through `codex queue`, and their answers are read from transcripts. Without it, Claude Code sessions outside tmux are still listed read-only. See the [design](design.md#84-external-sessions-experimental) for the details and limits. |
+| `external_sessions` | `false` | Let clients message agent sessions the bridge cannot type into: sessions running **outside** tmux, and Claude Code or Codex started from a shell inside a tmux pane. Claude Code sessions get messages through their inbox socket, Codex sessions through `codex queue`, and their answers are read from transcripts. Without it, Claude Code sessions outside tmux are still listed read-only. See the [design](design.md#84-external-sessions-experimental) for the details and limits. |
 
 ## `[agents.<name>]`
 
@@ -182,7 +182,9 @@ drives.
 **Git works on whole repositories.** A git request is allowed only when the repository's root
 lies in a workspace with `git`, and no workspace inside the repository forbids it. Exposing just
 a subfolder of a repository therefore does not expose its git history; expose the repository
-root instead.
+root instead. The places git reads history from must lie in workspaces with `git` as well: a
+linked worktree (`git worktree add`) needs its main repository exposed, and a repository whose
+`.git` file or object alternates point elsewhere needs that location exposed.
 
 | Capability | Grants |
 |---|---|

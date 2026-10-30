@@ -142,6 +142,7 @@ sgb pc1 POST /v1/sessions /tmp/start.json
   - `401`: wrong or missing token. Check the secret name, then tell me.
   - `403`: not allowed in that folder. Do not retry; tell me.
   - `409 busy`: a turn is still running. Wait first.
+  - `409 path_changed`: the file changed while it was read. Retry once.
   - `429`: wait `Retry-After` seconds.
   - `503`, `agent_exited`, `delivery_failed`: tell me; retrying the same call will not help.
 - **Incomplete lists:** if a session list has `warnings`, some sources failed. Do not conclude that
