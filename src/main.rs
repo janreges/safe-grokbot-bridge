@@ -93,8 +93,13 @@ fn main() -> Result<()> {
             args,
         } => launch(&config.path(), &agent, args),
         Command::Openapi => {
-            println!("{}", api::openapi().to_pretty_json()?);
-            Ok(())
+            use std::io::Write;
+            let document = api::openapi().to_pretty_json()?;
+            match writeln!(std::io::stdout().lock(), "{document}") {
+                // The reader stopped early (`… | head`): not an error.
+                Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+                other => other.map_err(Into::into),
+            }
         }
         Command::Hook {
             agent,
