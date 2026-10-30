@@ -1,12 +1,15 @@
 //! Read-only file access: directory listings and line ranges of text files.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use axum::http::StatusCode;
-use ignore::WalkBuilder;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::{Match, WalkBuilder};
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -118,16 +121,12 @@ pub fn list(
             dir.display()
         )));
     }
-    if !ignore_files_safe(dir) {
-        return Err(ApiError::forbidden(format!(
-            "`{}` has a `.gitignore` or `.ignore` that is not a regular file of at most 1 MiB (a link, a pipe or a huge file), so it is not listed. List a subfolder, or read files directly with GET /v1/files/content.",
-            dir.display()
-        )));
-    }
     let depth = depth.clamp(1, MAX_DEPTH);
     let limit = limit.clamp(1, MAX_LIST_LIMIT);
-    let unsafe_folders = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let skipped_folders = unsafe_folders.clone();
+    let ignores = IgnoreRules {
+        top: ws.root.clone(),
+        loaded: Mutex::default(),
+    };
     // The rules of every workspace, most specific first, so that an entry is judged by the
     // workspace it belongs to (a nested workspace may forbid what its parent allows).
     let mut rules: Vec<(std::path::PathBuf, bool, DenyRules)> = config
@@ -136,16 +135,12 @@ pub fn list(
         .map(|w| (w.root.clone(), w.allows(Capability::Files), w.deny.clone()))
         .collect();
     rules.sort_by_key(|(root, _, _)| std::cmp::Reverse(root.components().count()));
-    // The walker reads the ignore files of every folder it enters, so a folder is entered only
-    // when they are safe to read. Ignore files of parent folders and `.git/info/exclude`, which
-    // are not checked, are not read.
+    // The walker's own ignore-file handling is off: it would open ignore files by name, and they
+    // belong to whoever can write in the workspace. `IgnoreRules` reads them safely instead.
     let walker = WalkBuilder::new(dir)
         .max_depth(Some(depth))
-        .hidden(false)
+        .standard_filters(false)
         .follow_links(false)
-        .require_git(false)
-        .parents(false)
-        .git_exclude(false)
         .sort_by_file_path(|a, b| a.cmp(b))
         .filter_entry(move |entry| {
             let path = entry.path();
@@ -156,11 +151,7 @@ pub fn list(
                     *files && !deny.matches(path.strip_prefix(root).unwrap_or(path))
                 });
             let folder = entry.file_type().is_some_and(|t| t.is_dir());
-            if allowed && folder && !ignore_files_safe(path) {
-                skipped_folders.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return false;
-            }
-            allowed
+            allowed && (entry.depth() == 0 || !ignores.ignored(path, folder))
         })
         .build();
 
@@ -220,12 +211,7 @@ pub fn list(
             "{unreadable} entries could not be read (for example permission denied), so the listing is incomplete."
         ));
     }
-    let unsafe_folders = unsafe_folders.load(std::sync::atomic::Ordering::Relaxed);
-    if unsafe_folders > 0 {
-        notes.push(format!(
-            "{unsafe_folders} folders were left out because their `.gitignore` or `.ignore` is not a regular file of at most 1 MiB."
-        ));
-    }
+
     if entries.is_empty() && unreadable == 0 {
         notes.push(if offset > 0 && skipped < offset {
             format!("There are only {skipped} entries; `offset={offset}` is past the end.")
@@ -326,22 +312,57 @@ pub fn read(
     })
 }
 
-/// Whether the ignore files a listing reads in `folder` are small regular files (or absent): a
-/// link to a device or a pipe there would exhaust or block the listing.
-fn ignore_files_safe(folder: &Path) -> bool {
-    [".gitignore", ".ignore"].iter().all(|name| {
-        match std::fs::symlink_metadata(folder.join(name)) {
-            Ok(metadata) => metadata.is_file() && metadata.len() <= 1024 * 1024,
-            Err(err) => err.kind() == std::io::ErrorKind::NotFound,
-        }
-    })
+/// The `.gitignore` rules of the folders a listing walks through, from the workspace root down.
+/// A `.gitignore` belongs to whoever can write in the workspace, so it is read through a checked
+/// handle: a regular file only, at most 1 MiB, opened without following a final link or blocking
+/// on a pipe. Anything else counts as no rules.
+struct IgnoreRules {
+    top: PathBuf,
+    loaded: Mutex<HashMap<PathBuf, Option<Arc<Gitignore>>>>,
 }
 
-/// Opens a file that was authorized by its canonical path, and makes sure the handle is that
-/// file: someone who can write in the workspace could swap the file, or a folder above it, for a
-/// symlink between the check and the open. The open neither follows a final symlink nor blocks
-/// on a FIFO, and the handle must be a regular file.
-fn open_checked(path: &Path) -> Result<File, ApiError> {
+impl IgnoreRules {
+    /// Whether the `.gitignore` files of the folders above `path`, up to the workspace root,
+    /// exclude it. As in git, the nearest file with a matching rule decides.
+    fn ignored(&self, path: &Path, is_dir: bool) -> bool {
+        let mut folder = path.parent();
+        while let Some(dir) = folder.filter(|dir| dir.starts_with(&self.top)) {
+            if let Some(rules) = self.rules(dir) {
+                match rules.matched(path, is_dir) {
+                    Match::Ignore(_) => return true,
+                    Match::Whitelist(_) => return false,
+                    Match::None => {}
+                }
+            }
+            folder = dir.parent();
+        }
+        false
+    }
+
+    fn rules(&self, dir: &Path) -> Option<Arc<Gitignore>> {
+        let mut loaded = self.loaded.lock().unwrap_or_else(|err| err.into_inner());
+        loaded
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| {
+                let mut text = String::new();
+                open_regular(&dir.join(".gitignore"))
+                    .ok()?
+                    .take(1024 * 1024)
+                    .read_to_string(&mut text)
+                    .ok()?;
+                let mut builder = GitignoreBuilder::new(dir);
+                for line in text.lines() {
+                    let _ = builder.add_line(None, line);
+                }
+                builder.build().ok().map(Arc::new)
+            })
+            .clone()
+    }
+}
+
+/// Opens a regular file without following a final symlink or blocking on a FIFO, and checks the
+/// type on the handle.
+fn open_regular(path: &Path) -> std::io::Result<File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -349,14 +370,26 @@ fn open_checked(path: &Path) -> Result<File, ApiError> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    let file = options.open(path).map_err(|err| match err.kind() {
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    Ok(file)
+}
+
+/// Opens a file that was authorized by its canonical path, and makes sure the handle is that
+/// file: someone who can write in the workspace could swap the file, or a folder above it, for a
+/// symlink between the check and the open. The open neither follows a final symlink nor blocks
+/// on a FIFO, and the handle must be a regular file.
+fn open_checked(path: &Path) -> Result<File, ApiError> {
+    let file = open_regular(path).map_err(|err| match err.kind() {
         std::io::ErrorKind::PermissionDenied => {
             ApiError::forbidden(format!("`{}` cannot be read: {err}.", path.display()))
         }
         _ => changed(path),
     })?;
     let metadata = file.metadata().map_err(ApiError::internal)?;
-    if !metadata.is_file() || !opened_as(&file, &metadata, path) {
+    if !opened_as(&file, &metadata, path) {
         return Err(changed(path));
     }
     Ok(file)
@@ -502,17 +535,41 @@ mod tests {
     fn unsafe_ignore_files_are_not_read() {
         let dir = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(dir.path()).unwrap();
-        std::fs::create_dir_all(root.join("ok")).unwrap();
-        std::fs::create_dir_all(root.join("trap")).unwrap();
-        std::os::unix::fs::symlink("/dev/zero", root.join("trap/.gitignore")).unwrap();
+        for folder in ["linked", "pipe", "src/generated"] {
+            std::fs::create_dir_all(root.join(folder)).unwrap();
+            std::fs::write(root.join(folder).join("a.txt"), "x").unwrap();
+        }
+        // A link to a device and a FIFO would exhaust or block a reader; both count as no rules.
+        std::os::unix::fs::symlink("/dev/zero", root.join("linked/.gitignore")).unwrap();
+        let fifo = std::process::Command::new("mkfifo")
+            .arg(root.join("pipe/.gitignore"))
+            .status()
+            .unwrap();
+        assert!(fifo.success());
+        // Rules of a parent folder inside the workspace apply to listings of subfolders.
+        std::fs::write(root.join(".gitignore"), "generated/\n").unwrap();
         let cfg = workspace(&root);
         let ws = &cfg.workspaces[0];
-        let listing = list(&cfg, ws, &root, 3, 100, 0).unwrap();
-        let names: Vec<&str> = listing.entries.iter().map(|e| e.path.as_str()).collect();
-        assert!(names.iter().all(|n| !n.contains("trap")), "{names:?}");
-        assert!(listing.note.unwrap().contains("1 folders were left out"));
-        let err = list(&cfg, ws, &root.join("trap"), 1, 10, 0).unwrap_err();
-        assert_eq!(err.code, "forbidden");
+        let names = |dir: &Path| -> Vec<String> {
+            let listing = list(&cfg, ws, dir, 3, 100, 0).unwrap();
+            listing.entries.into_iter().map(|e| e.path).collect()
+        };
+        let all = names(&root);
+        assert!(
+            all.iter()
+                .any(|n| n.ends_with("a.txt") && n.contains("linked")),
+            "{all:?}"
+        );
+        assert!(
+            all.iter()
+                .any(|n| n.ends_with("a.txt") && n.contains("pipe")),
+            "{all:?}"
+        );
+        assert!(
+            !names(&root.join("src"))
+                .iter()
+                .any(|n| n.contains("generated"))
+        );
     }
 
     #[test]
