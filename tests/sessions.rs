@@ -250,6 +250,35 @@ async fn a_finished_turn_leaves_no_processes_behind() {
 }
 
 #[tokio::test]
+async fn a_replaced_folder_gets_no_further_turns() {
+    let Headless { h, _bin, .. } = headless_harness().await;
+    let project = h.root.join("project");
+    std::fs::create_dir(&project).unwrap();
+    let (_, started) = h
+        .post(
+            "/v1/sessions",
+            json!({"cwd": project, "agent": "claude", "prompt": "hello"}),
+        )
+        .await;
+    let id = started["id"].as_str().unwrap().to_string();
+    wait_idle(&h, &id).await;
+    // Another folder now has the session's path.
+    std::fs::rename(&project, h.root.join("project-old")).unwrap();
+    std::fs::create_dir(&project).unwrap();
+    let (status, body) = h
+        .post(
+            &format!("/v1/sessions/{id}/input"),
+            json!({"text": "again"}),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (StatusCode::CONFLICT, Some("path_changed")),
+        "{body}"
+    );
+}
+
+#[tokio::test]
 async fn start_requests_are_checked_against_the_workspace() {
     let Headless { h, .. } = headless_harness().await;
     let outside = h.dir.path().join("state");

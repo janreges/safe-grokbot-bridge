@@ -234,6 +234,8 @@ pub struct Record {
     pub agent: Agent,
     pub runner: Runner,
     pub cwd: PathBuf,
+    /// The identity of `cwd` when the session started (Unix); headless turns run only there.
+    pub cwd_id: Option<(u64, u64)>,
     pub workspace: String,
     pub keep_alive: bool,
     /// Options for every turn (model, effort, bypass); headless follow-ups add `resume`.
@@ -708,6 +710,7 @@ impl Sessions {
             agent: agent.clone(),
             runner: Runner::Tmux,
             cwd,
+            cwd_id: None,
             workspace: workspace.name.clone(),
             keep_alive: meta.keep_alive,
             launch: Launch::default(),
@@ -1281,6 +1284,9 @@ impl Sessions {
             agent: agent.clone(),
             runner,
             cwd: resolved.path.clone(),
+            cwd_id: std::fs::metadata(&resolved.path)
+                .ok()
+                .and_then(|m| crate::files::identity(&m)),
             workspace: ws.name.clone(),
             keep_alive,
             launch: launch.clone(),
@@ -1478,8 +1484,12 @@ impl Sessions {
     /// lock so that concurrent requests cannot start two turns.
     fn run_turn(&self, record: &Arc<Record>, prompt: String) -> Result<(), ApiError> {
         // The folder was authorized when the session started; a turn must not run in whatever
-        // has replaced it since (a symlink to another folder, say).
-        if dunce::canonicalize(&record.cwd).ok().as_deref() != Some(record.cwd.as_path()) {
+        // has replaced it since (a symlink to another folder, or another folder). The turn
+        // itself checks again through a handle it keeps.
+        let same = std::fs::metadata(&record.cwd)
+            .ok()
+            .is_some_and(|m| crate::files::identity(&m) == record.cwd_id);
+        if !same || dunce::canonicalize(&record.cwd).ok().as_deref() != Some(record.cwd.as_path()) {
             return Err(ApiError::conflict(
                 "path_changed",
                 format!(

@@ -465,6 +465,21 @@ fn changed(path: &Path) -> ApiError {
     )
 }
 
+/// The identity of a folder (device and inode on Unix), to recognise it when its path may have
+/// been pointed elsewhere; `None` where the platform does not provide one.
+pub fn identity(metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
 pub fn rfc3339(time: SystemTime) -> String {
     humantime::format_rfc3339_seconds(time).to_string()
 }

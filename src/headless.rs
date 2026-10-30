@@ -66,8 +66,38 @@ async fn run_turn(
     })?;
     let mut cmd = Command::new(program);
     scrub_env(&mut cmd);
+    // The agent starts in the folder the session was authorized for, entered through a handle
+    // checked against the folder's identity, so a path swapped meanwhile cannot redirect it.
+    #[cfg(unix)]
+    let folder = {
+        let folder = std::fs::File::open(&record.cwd)
+            .and_then(|f| f.metadata().map(|m| (f, m)))
+            .ok()
+            .filter(|(_, m)| m.is_dir() && crate::files::identity(m) == record.cwd_id)
+            .map(|(f, _)| f)
+            .ok_or_else(|| {
+                format!(
+                    "The session's folder {} was moved or replaced since the session started; start a new session in the folder you want.",
+                    record.cwd.display()
+                )
+            })?;
+        use std::os::fd::AsRawFd;
+        let fd = folder.as_raw_fd();
+        // SAFETY: fchdir is async-signal-safe, and `folder` stays open until after the spawn.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::fchdir(fd) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+        folder
+    };
+    #[cfg(not(unix))]
+    cmd.current_dir(&record.cwd);
     cmd.args(&argv[1..])
-        .current_dir(&record.cwd)
         .envs(agent.env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -79,6 +109,8 @@ async fn run_turn(
     let mut child = cmd
         .spawn()
         .map_err(|err| format!("Cannot start `{}`: {err}", argv[0]))?;
+    #[cfg(unix)]
+    drop(folder);
     let pid = child.id();
     {
         // Publish the pid and check, under one lock, that the turn was not stopped while the
