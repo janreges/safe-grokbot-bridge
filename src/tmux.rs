@@ -287,11 +287,13 @@ fn escape_separator(arg: &str) -> String {
     }
 }
 
+/// A missing or dead server, which has no panes. A socket that cannot be reached for another
+/// reason (permissions) is an error: reading it as "no panes" would make every session look gone.
 fn no_server(err: &anyhow::Error) -> bool {
     let text = err.to_string();
     text.contains("no server running")
-        || text.contains("error connecting to")
-        || text.contains("No such file")
+        || text.contains("No such file or directory")
+        || text.contains("Connection refused")
 }
 
 /// tmux target for a bridge-started session: its (only) pane, matched by exact session name.
