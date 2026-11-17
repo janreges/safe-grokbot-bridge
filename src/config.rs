@@ -147,6 +147,8 @@ struct RawWorkspace {
 #[derive(Debug)]
 pub struct Config {
     pub path: PathBuf,
+    /// The config file's canonical path, so that the file endpoints can refuse to serve it.
+    pub canonical_path: Option<PathBuf>,
     pub server: Server,
     pub tokens: Vec<Token>,
     pub limits: Limits,
@@ -506,6 +508,7 @@ impl Config {
         let workspaces = resolve_workspaces(raw.workspaces, &agents)?;
         Ok(Config {
             path: path.to_path_buf(),
+            canonical_path: dunce::canonicalize(path).ok(),
             server,
             tokens,
             limits: raw.limits,
@@ -527,6 +530,11 @@ impl Config {
 
     pub fn token(&self, name: &str) -> Option<&Token> {
         self.tokens.iter().find(|t| t.name == name)
+    }
+
+    /// Whether a canonical path is this bridge's own config file, which may hold API keys.
+    pub fn is_config_file(&self, canonical: &Path) -> bool {
+        self.canonical_path.as_deref() == Some(canonical)
     }
 }
 

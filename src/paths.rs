@@ -52,6 +52,13 @@ pub fn resolve<'a>(config: &'a Config, raw: &str) -> Result<Resolved<'a>, ApiErr
         }
     };
     let workspace = workspace_for(config, &canonical).ok_or_else(outside)?;
+    if config.is_config_file(&canonical) {
+        return Err(ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "denied",
+            format!("`{raw}` is this bridge's configuration file, which is never served."),
+        ));
+    }
     let rel = canonical
         .strip_prefix(&workspace.root)
         .unwrap_or(Path::new(""))

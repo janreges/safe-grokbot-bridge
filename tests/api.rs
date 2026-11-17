@@ -5,7 +5,8 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{harness, url};
-use safe_grokbot_bridge::api;
+use safe_grokbot_bridge::config::Config;
+use safe_grokbot_bridge::{api, auth, server};
 use serde_json::Value;
 use std::path::Path;
 
@@ -159,6 +160,57 @@ async fn models_only_tokens_reach_only_the_open_routes() {
         StatusCode::OK
     );
     assert_eq!(h.get("/v1/info").await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_config_file_is_never_served() {
+    // A config kept inside a workspace, as with a workspace at the home folder.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap().join("ws");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("README.md"), "# Demo\n").unwrap();
+    let token = auth::generate_token();
+    let file = root.join("bridge.toml");
+    std::fs::write(
+        &file,
+        format!(
+            "[server]\nstate_dir = {}\n[[tokens]]\nname = \"test\"\nsha256 = \"{}\"\n[[workspaces]]\npath = {}\nallow = [\"files\"]\n",
+            common::toml_str(&dir.path().join("state")),
+            auth::hash_token(&token),
+            common::toml_str(&root),
+        ),
+    )
+    .unwrap();
+    let config = Config::load(&file).unwrap();
+    let router = api::router(server::App::new(config).await.unwrap());
+    let h = common::Harness {
+        router,
+        token,
+        root: root.clone(),
+        dir,
+    };
+
+    let (status, body) = h.get(&url("/v1/files", "path", &root)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(listed, [root.join("README.md").display().to_string()]);
+
+    let (status, body) = h.get(&url("/v1/files/content", "path", &file)).await;
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("denied"))
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("configuration file")
+    );
 }
 
 #[test]

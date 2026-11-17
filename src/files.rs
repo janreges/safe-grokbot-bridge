@@ -135,6 +135,7 @@ pub fn list(
         .map(|w| (w.root.clone(), w.allows(Capability::Files), w.deny.clone()))
         .collect();
     rules.sort_by_key(|(root, _, _)| std::cmp::Reverse(root.components().count()));
+    let config_file = config.canonical_path.clone();
     // The walker's own ignore-file handling is off: it would open ignore files by name, and they
     // belong to whoever can write in the workspace. `IgnoreRules` reads them safely instead.
     let walker = WalkBuilder::new(dir)
@@ -151,7 +152,9 @@ pub fn list(
                     *files && !deny.matches(path.strip_prefix(root).unwrap_or(path))
                 });
             let folder = entry.file_type().is_some_and(|t| t.is_dir());
-            allowed && (entry.depth() == 0 || !ignores.ignored(path, folder))
+            allowed
+                && config_file.as_deref() != Some(path)
+                && (entry.depth() == 0 || !ignores.ignored(path, folder))
         })
         .build();
 
