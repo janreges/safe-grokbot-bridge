@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{Harness, extra_token, harness};
+use common::{Harness, extra_token, harness, toml_str};
 use http_body_util::BodyExt;
 use safe_grokbot_bridge::inbox::{self, Kind, NewMessage, Source};
 use serde_json::json;
@@ -271,6 +271,44 @@ async fn an_id_that_is_not_a_message_id_never_reaches_a_path() {
     let (status, body) = h.get("/v1/inbox/..%2F..%2Fsecret.txt").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn a_message_sent_from_the_command_line_is_listed_with_its_project() {
+    let h = harness("[\"files\"]", "").await;
+    let config = h.dir.path().join("cli.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[server]\nstate_dir = {}\n[[tokens]]\nname = \"test\"\nsha256 = \"{}\"\n[[workspaces]]\npath = {}\nallow = [\"files\"]\n",
+            toml_str(&state_dir(&h)),
+            safe_grokbot_bridge::auth::hash_token(&h.token),
+            toml_str(&h.root),
+        ),
+    )
+    .unwrap();
+    let body = h.dir.path().join("body.md");
+    std::fs::write(&body, "Sent with the CLI.").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_safe-grokbot-bridge"))
+        .current_dir(&h.root)
+        .args(["inbox", "send", "--config"])
+        .arg(&config)
+        .args(["--kind", "task", "--subject", "From the CLI", "--body-file"])
+        .arg(&body)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let (status, list) = h.get("/v1/inbox?state=all").await;
+    assert_eq!(status, StatusCode::OK);
+    let stored = &list["messages"][0];
+    assert_eq!(stored["subject"], "From the CLI");
+    assert_eq!(stored["project"], h.root.to_str().unwrap(), "{stored}");
 }
 
 /// A GET request that returns the raw response, for downloads.

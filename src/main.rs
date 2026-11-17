@@ -1,11 +1,14 @@
 //! Command-line entry point of safe-grokbot-bridge.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use safe_grokbot_bridge::agents::{HookSpec, Launch};
 use safe_grokbot_bridge::config::{self, AgentKind, Capability, Config};
+use safe_grokbot_bridge::inbox::{self, Kind, NewMessage, Source, State};
 use safe_grokbot_bridge::models::{Models, Probe, Timing};
 use safe_grokbot_bridge::tmux::Tmux;
 use safe_grokbot_bridge::{api, auth, exec, hook, paths, server, sessions, tls, transfer};
@@ -66,6 +69,12 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
+    /// Leave messages for Grok Bot in the inbox, or look at them. Works on this machine only, with
+    /// or without the bridge running; the bot reads and claims messages through the API.
+    Inbox {
+        #[command(subcommand)]
+        action: InboxAction,
+    },
     /// Print the OpenAPI document of the HTTP API.
     Openapi,
     /// Record a turn-complete event (called by agent hooks, not by people).
@@ -76,6 +85,162 @@ enum Command {
         /// Event payload (Codex passes it as an argument; Claude Code on stdin).
         payload: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum InboxAction {
+    /// Store a message. Its body is Markdown, read from --body-file or from stdin.
+    Send {
+        #[command(flatten)]
+        config: ConfigArg,
+        /// `task`: new work, which the bot first gives to the most suitable bot. `followup`:
+        /// input for work that is already under way.
+        #[arg(long, value_parser = ["task", "followup"])]
+        kind: String,
+        /// One line that names the job, at most 200 bytes.
+        #[arg(long)]
+        subject: String,
+        /// The Markdown body. Without it, the body is read from stdin.
+        #[arg(long)]
+        body_file: Option<PathBuf>,
+        /// The folder the message concerns. Defaults to the current folder when it lies in a
+        /// workspace.
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Only this bot may take the message, for example `Homelab`.
+        #[arg(long)]
+        to: Option<String>,
+        /// A file to attach; repeat for more. At most 20 files and 96 MB together.
+        #[arg(long = "attach")]
+        attach: Vec<PathBuf>,
+    },
+    /// List messages, newest first. Claimed messages are left out unless --all is given.
+    List {
+        #[command(flatten)]
+        config: ConfigArg,
+        /// Include the messages a bot has claimed.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Print one message in full as JSON, with its body and its claim history.
+    Show {
+        #[command(flatten)]
+        config: ConfigArg,
+        /// Message id from `inbox list`.
+        id: String,
+    },
+    /// Delete a message and its attachments.
+    Delete {
+        #[command(flatten)]
+        config: ConfigArg,
+        /// Message id from `inbox list`.
+        id: String,
+    },
+}
+
+fn inbox_command(action: InboxAction) -> Result<()> {
+    match action {
+        InboxAction::Send {
+            config,
+            kind,
+            subject,
+            body_file,
+            project,
+            to,
+            attach,
+        } => {
+            let config = Config::load(&config.path())?;
+            let body = match body_file {
+                Some(path) => std::fs::read_to_string(&path)
+                    .with_context(|| format!("cannot read {}", path.display()))?,
+                None => {
+                    let mut text = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut text)
+                        .context("cannot read the body from stdin")?;
+                    text
+                }
+            };
+            let project = match project {
+                Some(path) => Some(std::path::absolute(path)?),
+                None => std::env::current_dir()
+                    .ok()
+                    .and_then(|cwd| dunce::canonicalize(cwd).ok())
+                    .filter(|cwd| config.workspaces.iter().any(|ws| cwd.starts_with(&ws.root))),
+            };
+            let attachments = attach
+                .into_iter()
+                .map(|path| {
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .ok_or_else(|| anyhow!("`{}` has no usable file name", path.display()))?
+                        .to_owned();
+                    Ok(Source { name, path })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let message = inbox::send(
+                &config.server.state_dir,
+                NewMessage {
+                    kind: if kind == "task" {
+                        Kind::Task
+                    } else {
+                        Kind::Followup
+                    },
+                    subject,
+                    project: project.map(|path| path.display().to_string()),
+                    to,
+                    body,
+                    attachments,
+                },
+                SystemTime::now(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&message)?);
+        }
+        InboxAction::List { config, all } => {
+            let config = Config::load(&config.path())?;
+            let listing = inbox::list(&config.server.state_dir, None, None, usize::MAX)?;
+            let messages: Vec<_> = listing
+                .messages
+                .into_iter()
+                .filter(|m| all || m.state != State::Claimed)
+                .collect();
+            if messages.is_empty() {
+                println!("No messages{}.", if all { "" } else { " open for a bot" });
+            }
+            for m in messages {
+                let kind = match m.kind {
+                    Kind::Task => "task",
+                    Kind::Followup => "followup",
+                };
+                let state = match m.state {
+                    State::Unread => "unread",
+                    State::Claimed => "claimed",
+                    State::Released => "released",
+                };
+                println!(
+                    "{}  {:<8}  {:<8}  {}  {}  {}",
+                    m.id,
+                    kind,
+                    state,
+                    m.to.as_deref().unwrap_or("any bot"),
+                    m.claimed_by.as_deref().unwrap_or("-"),
+                    m.subject
+                );
+            }
+        }
+        InboxAction::Show { config, id } => {
+            let config = Config::load(&config.path())?;
+            let message = inbox::get(&config.server.state_dir, &id)?;
+            println!("{}", serde_json::to_string_pretty(&message)?);
+        }
+        InboxAction::Delete { config, id } => {
+            let config = Config::load(&config.path())?;
+            inbox::delete(&config.server.state_dir, &id)?;
+            println!("Deleted message {id}.");
+        }
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -93,6 +258,7 @@ fn main() -> Result<()> {
             config,
             args,
         } => launch(&config.path(), &agent, args),
+        Command::Inbox { action } => inbox_command(action),
         Command::Openapi => {
             use std::io::Write;
             let document = api::openapi().to_pretty_json()?;
