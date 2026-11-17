@@ -343,6 +343,14 @@ fn check_models(
         }
         probes
     });
+    // Model names may be longer than the other sections' names; the columns follow the longest.
+    let width = config
+        .models
+        .iter()
+        .map(|m| m.name.len())
+        .max()
+        .unwrap_or(0)
+        .max(12);
     for (model, probe) in config.models.iter().zip(probes) {
         let table = format!("[models.{}]", model.name);
         let result = match probe {
@@ -379,7 +387,7 @@ fn check_models(
             }
         };
         println!(
-            "  {:<12} {:<15} {:<9} {}, model {}: {result}",
+            "  {:<width$} {:<15} {:<9} {}, model {}: {result}",
             model.name,
             model.kind.as_str(),
             match model.api {
