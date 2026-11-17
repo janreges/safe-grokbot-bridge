@@ -295,6 +295,9 @@ async fn every_endpoint_takes_only_its_model_types() {
             "{path} {refused}"
         );
         assert!(message(&body).contains(hint), "{body}");
+        // "a embedding model" reads wrong; the type is named as a value instead.
+        let named = format!("`{refused}` is a model of type `");
+        assert!(message(&body).contains(&named), "{body}");
     }
 }
 

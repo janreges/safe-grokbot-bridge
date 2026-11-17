@@ -307,7 +307,7 @@ pub fn select<'a>(
             StatusCode::BAD_REQUEST,
             "wrong_model_type",
             format!(
-                "`{name}` is a {} model{api}; call it with POST {}.",
+                "`{name}` is a model of type `{}`{api}; call it with POST {}.",
                 model.kind.as_str(),
                 endpoint_of(model).path
             ),
