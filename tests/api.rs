@@ -174,7 +174,7 @@ async fn the_config_file_is_never_served() {
     std::fs::write(
         &file,
         format!(
-            "[server]\nstate_dir = {}\n[[tokens]]\nname = \"test\"\nsha256 = \"{}\"\n[[workspaces]]\npath = {}\nallow = [\"files\"]\n",
+            "[server]\nstate_dir = {}\n[[tokens]]\nname = \"test\"\nsha256 = \"{}\"\n[[workspaces]]\npath = {}\nallow = [\"files\", \"download\"]\n",
             common::toml_str(&dir.path().join("state")),
             auth::hash_token(&token),
             common::toml_str(&root),
@@ -210,6 +210,11 @@ async fn the_config_file_is_never_served() {
             .as_str()
             .unwrap()
             .contains("configuration file")
+    );
+    let (status, body) = h.get(&url("/v1/files/download", "path", &file)).await;
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("denied"))
     );
 }
 
