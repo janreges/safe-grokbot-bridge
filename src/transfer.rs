@@ -375,6 +375,70 @@ fn disposition(name: &str) -> String {
     format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
 }
 
+/// What `check` should say about a workspace's incoming folder, if anything.
+pub fn inbox_warning(ws: &Workspace) -> Option<String> {
+    if !ws.allows(Capability::Upload) {
+        return None;
+    }
+    if ws.root.parent().is_none() {
+        return Some(format!(
+            "Workspace `{}` allows `upload`, but its folder is the root of a file system, which gets no incoming folder; uploads are refused there.",
+            ws.name
+        ));
+    }
+    let inbox = ws.root.join(INBOX);
+    // A missing folder is created by the first upload.
+    let metadata = std::fs::symlink_metadata(&inbox).ok()?;
+    let problem = if metadata.file_type().is_symlink() {
+        "is a symbolic link, so uploads are refused".to_string()
+    } else if !metadata.is_dir() {
+        "is not a folder, so uploads are refused".to_string()
+    } else if !writable(&inbox) {
+        "is not writable for the bridge's user, so uploads fail".to_string()
+    } else if group_or_others_may_write(&metadata) {
+        format!(
+            "can be written by group or others; run `chmod 700 {}`",
+            inbox.display()
+        )
+    } else {
+        return None;
+    };
+    Some(format!(
+        "The incoming folder {} of workspace `{}` {problem}.",
+        inbox.display(),
+        ws.name
+    ))
+}
+
+fn writable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: `path` is a valid NUL-terminated string for the duration of the call.
+        unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::metadata(path).is_ok_and(|m| !m.permissions().readonly())
+    }
+}
+
+fn group_or_others_may_write(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o022 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
 fn write_error(err: std::io::Error) -> ApiError {
     match err.kind() {
         std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded => ApiError::new(
@@ -668,6 +732,47 @@ mod tests {
             std::fs::read_to_string(inbox.join(".gitignore")).unwrap(),
             "*\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_warns_about_a_doubtful_inbox() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let config = workspace(&root);
+        let ws = &config.workspaces[0];
+        assert_eq!(inbox_warning(ws), None, "a missing folder is created later");
+        let inbox = prepare_inbox(ws).unwrap();
+        assert_eq!(inbox_warning(ws), None);
+
+        std::fs::set_permissions(&inbox, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let warning = inbox_warning(ws).unwrap();
+        assert!(warning.contains("group or others"), "{warning}");
+
+        std::fs::set_permissions(&inbox, std::fs::Permissions::from_mode(0o500)).unwrap();
+        // Root may write anyway, so only check where the test does not run as root.
+        if unsafe { libc::geteuid() } != 0 {
+            let warning = inbox_warning(ws).unwrap();
+            assert!(warning.contains("not writable"), "{warning}");
+        }
+        std::fs::set_permissions(&inbox, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        std::fs::remove_dir_all(&inbox).unwrap();
+        std::os::unix::fs::symlink(dir.path(), &inbox).unwrap();
+        let warning = inbox_warning(ws).unwrap();
+        assert!(warning.contains("link"), "{warning}");
+
+        let read_only = Config::parse(
+            &format!(
+                "[[tokens]]\nname = \"t\"\nsha256 = \"{}\"\n[[workspaces]]\npath = {}\n",
+                "0".repeat(64),
+                toml::Value::String(root.display().to_string())
+            ),
+            Path::new("test.toml"),
+        )
+        .unwrap();
+        assert_eq!(inbox_warning(&read_only.workspaces[0]), None);
     }
 
     #[cfg(unix)]

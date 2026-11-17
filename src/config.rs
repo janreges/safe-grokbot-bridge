@@ -966,7 +966,9 @@ sha256 = "{token_hash}"
 
 [[workspaces]]
 path = {workspace}
-# Read-only by default. Add "input" and "start" to let the client drive agents here.
+# Read-only by default. Add "input" and "start" to let the client drive agents here,
+# "download" to let it download files of any kind, and "upload" to let it add files to the
+# incoming folder .sgb-inbox/ here.
 allow = ["files", "git", "sessions"]
 # agents = ["claude", "codex"]        # which agents may be started here (default: all)
 # allow_bypass_permissions = false    # allow starting agents without permission prompts

@@ -8,7 +8,7 @@ use safe_grokbot_bridge::agents::{HookSpec, Launch};
 use safe_grokbot_bridge::config::{self, AgentKind, Capability, Config};
 use safe_grokbot_bridge::models::{Models, Probe, Timing};
 use safe_grokbot_bridge::tmux::Tmux;
-use safe_grokbot_bridge::{api, auth, exec, hook, paths, server, sessions, tls};
+use safe_grokbot_bridge::{api, auth, exec, hook, paths, server, sessions, tls, transfer};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -297,6 +297,9 @@ fn check(path: &Path) -> Result<()> {
                 "Workspace `{}` lets clients start agents without permission prompts.",
                 ws.name
             ));
+        }
+        if let Some(warning) = transfer::inbox_warning(ws) {
+            warnings.push(warning);
         }
     }
     if config.experimental.external_sessions {
