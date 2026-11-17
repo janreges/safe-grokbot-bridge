@@ -704,7 +704,7 @@ async fn forward(
         return upstream_error(model, started, err);
     }
     if status.is_redirection() || status == StatusCode::NOT_FOUND {
-        let start = excerpt(upstream, timing.silence).await;
+        let start = excerpt(upstream).await;
         let what = if status.is_redirection() {
             "a redirect, which the bridge does not follow".to_string()
         } else if start.is_empty() {
@@ -725,8 +725,27 @@ async fn forward(
     relay(upstream, slot, model, timing)
 }
 
-/// The start of an answer the bridge explains instead of relaying: at most 300 characters.
-async fn excerpt(mut upstream: reqwest::Response, wait: Duration) -> String {
+/// Longest wait for the start of an upstream error answer. Cloudflare gives up on the whole answer
+/// after about two minutes, so an explanation that comes later reaches no one.
+const EXCERPT_WAIT: Duration = Duration::from_secs(2);
+
+/// The keep-alive to send while an event stream is silent, if the bytes so far end a line. A
+/// partial line cannot be interrupted: whatever follows would join it and corrupt its event.
+fn keep_alive_line(tail: &[u8]) -> Option<&'static [u8]> {
+    if tail.is_empty() || tail.ends_with(b"\n\n") || tail.ends_with(b"\r\n\r\n") {
+        // Between events: a comment and the blank line that ends it, which dispatches nothing.
+        Some(b": keep-alive\n\n")
+    } else if tail.ends_with(b"\n") {
+        // Inside an event: a comment line, which the format ignores; the event's blank line ends it.
+        Some(b": keep-alive\n")
+    } else {
+        None
+    }
+}
+
+/// The start of an answer the bridge explains instead of relaying: at most 300 characters, and
+/// only what arrives within `EXCERPT_WAIT`.
+async fn excerpt(mut upstream: reqwest::Response) -> String {
     let mut bytes = Vec::new();
     let read = async {
         while bytes.len() < 4096 {
@@ -736,7 +755,7 @@ async fn excerpt(mut upstream: reqwest::Response, wait: Duration) -> String {
             }
         }
     };
-    let _ = tokio::time::timeout(wait, read).await;
+    let _ = tokio::time::timeout(EXCERPT_WAIT, read).await;
     let text: String = String::from_utf8_lossy(&bytes).chars().take(300).collect();
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -894,12 +913,8 @@ impl Relay {
                         tracing::warn!(model = %self.model, "a model stream stayed silent too long and was cut");
                         return self.fail("the model's stream stayed silent too long");
                     }
-                    // A comment line is only valid where an event may start.
-                    let boundary = self.tail.is_empty()
-                        || self.tail.ends_with(b"\n\n")
-                        || self.tail.ends_with(b"\r\n\r\n");
-                    if boundary {
-                        return Some(Ok(Bytes::from_static(b": keep-alive\n\n")));
+                    if let Some(line) = keep_alive_line(&self.tail) {
+                        return Some(Ok(Bytes::from_static(line)));
                     }
                 }
             }
