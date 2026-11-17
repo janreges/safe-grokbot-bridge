@@ -43,6 +43,16 @@ pub async fn harness(allow: &str, extra: &str) -> Harness {
     }
 }
 
+/// A second token: `(token, "[[tokens]]…" TOML with the `extra` lines)`.
+pub fn extra_token(name: &str, extra: &str) -> (String, String) {
+    let token = auth::generate_token();
+    let toml = format!(
+        "[[tokens]]\nname = \"{name}\"\nsha256 = \"{}\"\n{extra}\n",
+        auth::hash_token(&token)
+    );
+    (token, toml)
+}
+
 pub fn toml_str(path: &Path) -> String {
     toml::Value::String(path.display().to_string()).to_string()
 }

@@ -120,6 +120,47 @@ async fn a_token_in_x_api_key_is_accepted() {
     );
 }
 
+#[tokio::test]
+async fn models_only_tokens_reach_only_the_open_routes() {
+    let (brain, toml) = common::extra_token("brain", "models_only = true");
+    let h = harness("[\"files\", \"git\", \"sessions\"]", &toml).await;
+    let closed = [
+        "/v1/info".to_string(),
+        url("/v1/files", "path", &h.root),
+        url("/v1/files/content", "path", &h.root.join("a.txt")),
+        url("/v1/git/status", "dir", &h.root),
+        "/v1/sessions".to_string(),
+    ];
+    for uri in &closed {
+        let (status, body) = h.request("GET", uri, None, Some(&brain)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+        assert_eq!(body["error"]["code"], "forbidden", "{uri}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("limited to models"),
+            "{body}"
+        );
+    }
+    let (status, _) = h
+        .request(
+            "POST",
+            "/v1/sessions",
+            Some(serde_json::json!({})),
+            Some(&brain),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        h.request("GET", "/openapi.json", None, Some(&brain))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(h.get("/v1/info").await.0, StatusCode::OK);
+}
+
 #[test]
 fn every_openapi_response_is_described() {
     let doc: Value = serde_json::from_str(&api::openapi().to_json().unwrap()).unwrap();

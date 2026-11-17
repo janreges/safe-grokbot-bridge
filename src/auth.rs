@@ -370,6 +370,30 @@ pub fn credential(headers: &HeaderMap) -> Option<String> {
 pub struct Caller {
     pub token: String,
     pub ip: IpAddr,
+    /// The token may call the model endpoints only.
+    pub models_only: bool,
+}
+
+/// Route layer for everything outside the model endpoints: a `models_only` token gets 403
+/// `forbidden`.
+pub async fn full_access(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let limited = request
+        .extensions()
+        .get::<Caller>()
+        .is_none_or(|caller| caller.models_only);
+    if limited {
+        return ApiError::forbidden(
+            "This token is limited to models. GET /v1/models lists the models it may call, and \
+             GET /openapi.json describes the endpoints.",
+        )
+        .into_response();
+    }
+    next.run(request).await
 }
 
 /// Authenticates every request that reaches the API routes and writes the audit log line.
@@ -404,9 +428,11 @@ pub async fn middleware(
             return response;
         }
     };
+    let models_only = app.config.token(&token).is_some_and(|t| t.models_only);
     request.extensions_mut().insert(Caller {
         token: token.clone(),
         ip,
+        models_only,
     });
     let started = Instant::now();
     let response = next.run(request).await;

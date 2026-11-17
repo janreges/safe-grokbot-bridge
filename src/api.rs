@@ -76,8 +76,17 @@ impl Modify for SecurityAddon {
 }
 
 fn api_routes() -> OpenApiRouter<AppState> {
-    OpenApiRouter::with_openapi(ApiDoc::openapi())
-        .routes(routes!(openapi_document))
+    open_routes().merge(full_routes().route_layer(middleware::from_fn(auth::full_access)))
+}
+
+/// Endpoints every token may call, `models_only` tokens included.
+fn open_routes() -> OpenApiRouter<AppState> {
+    OpenApiRouter::with_openapi(ApiDoc::openapi()).routes(routes!(openapi_document))
+}
+
+/// Endpoints closed to `models_only` tokens.
+fn full_routes() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new()
         .routes(routes!(info))
         .routes(routes!(list_files))
         .routes(routes!(read_file))
