@@ -1062,9 +1062,8 @@ mod tests {
     #[tokio::test]
     async fn a_body_that_stops_arriving_is_cut() {
         // A client that sends nothing more must not hold a model slot for ever.
-        let stalled = Body::from_stream(futures_util::stream::pending::<
-            Result<Bytes, std::io::Error>,
-        >());
+        let stalled =
+            Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
         let started = Instant::now();
         assert!(
             read_body(stalled, 1024, Duration::from_millis(50))
