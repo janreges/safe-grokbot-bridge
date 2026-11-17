@@ -564,6 +564,7 @@ pub fn prepare_inbox(ws: &Workspace) -> Result<PathBuf, ApiError> {
         }
         Ok(_) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg_attr(not(unix), allow(unused_mut))]
             let mut builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
             {
