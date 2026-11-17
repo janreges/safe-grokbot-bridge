@@ -199,7 +199,7 @@ fn inbox_command(action: InboxAction) -> Result<()> {
         }
         InboxAction::List { config, all } => {
             let config = Config::load(&config.path())?;
-            let listing = inbox::list(&config.server.state_dir, None, None, usize::MAX)?;
+            let listing = inbox::list(&config.server.state_dir, None, None, 0, usize::MAX)?;
             let messages: Vec<_> = listing
                 .messages
                 .into_iter()

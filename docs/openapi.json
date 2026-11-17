@@ -1844,6 +1844,16 @@
               "type": "integer",
               "minimum": 0
             }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Newer messages to skip, for the next page: 0 (the default) for the first page, then the\noffset that the `note` of the previous page names.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         ],
         "responses": {
@@ -3802,7 +3812,7 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "True when `messages` holds fewer messages than `total`."
+            "description": "True when more matching messages follow this page. The `note` then names the `offset` of\nthe next page."
           }
         }
       },
