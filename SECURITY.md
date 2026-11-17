@@ -58,6 +58,10 @@ Agents keep their own permission systems, and a client that may send input can a
 prompts. This is why every installation should run in an isolated environment, as described in
 [Where to run it](docs/deployment.md#where-to-run-it).
 
+- The inbox, where the owner leaves messages for Grok Bot, lives in the state directory, outside
+  every workspace. Every token except a `models_only` one can read, claim and give back its
+  messages, so put only what all your bots may see into a message.
+
 ## Hardening checklist
 
 - Run the bridge and its agents in a virtual machine, a dedicated WSL 2 distribution or a separate
