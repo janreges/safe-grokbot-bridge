@@ -22,6 +22,7 @@ use crate::error::{ApiError, ErrorBody};
 use crate::exec;
 use crate::files::{self, FileContent, FileList};
 use crate::git::{self, GitOutput, GitRequest};
+use crate::inbox;
 use crate::models::{self, ModelInfo, ModelList};
 use crate::paths;
 use crate::server::AppState;
@@ -58,6 +59,7 @@ under `/v1`, so stock client libraries work with the bridge token as their API k
         (name = "info", description = "Machine overview and this API's description"),
         (name = "files", description = "Read-only file access"),
         (name = "git", description = "Read-only git access"),
+        (name = "inbox", description = "Messages the owner leaves for Grok Bot: read, claim, give back"),
         (name = "sessions", description = "Agent sessions: list, start, talk to, stop"),
         (name = "models", description = "Models behind the bridge, called with OpenAI- and Anthropic-compatible requests"),
     )
@@ -123,6 +125,11 @@ fn full_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(list_sessions, start_session))
         .routes(routes!(get_session, stop_session))
         .routes(routes!(send_input))
+        .routes(routes!(list_inbox))
+        .routes(routes!(get_inbox_message))
+        .routes(routes!(get_inbox_attachment))
+        .routes(routes!(claim_inbox_message))
+        .routes(routes!(release_inbox_message))
 }
 
 /// The OpenAPI document served at `/openapi.json`.
@@ -657,6 +664,219 @@ async fn download_file(
     q: Result<Query<DownloadQuery>, QueryRejection>,
 ) -> axum::response::Response {
     transfer::download(&app, query(q).map(|q| q.path)).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Inbox
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct InboxQuery {
+    /// Which messages: `unread` (the default; no bot has taken them), `claimed`, `released` (a bot
+    /// gave them back), or `all`.
+    pub state: Option<String>,
+    /// Only messages for this bot and for every bot. Pass your own bot name, for example `Homelab`.
+    pub to: Option<String>,
+    /// Messages to return, 1–200 (default 50). The newest come first.
+    pub limit: Option<usize>,
+}
+
+/// A page of the inbox. Bodies are left out: read a message with GET /v1/inbox/{id} before you
+/// claim it.
+#[derive(Serialize, ToSchema)]
+pub struct InboxList {
+    /// Newest first.
+    pub messages: Vec<inbox::Message>,
+    /// How many messages match the filter in all.
+    pub total: usize,
+    /// True when `messages` holds fewer messages than `total`.
+    pub truncated: bool,
+    /// What to do next when the list is empty or cut short. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// A bot's claim or release of a message.
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InboxAction {
+    /// The bot that takes or gives back the message, for example `Homelab`. At most 64 characters.
+    pub bot: String,
+    /// Why the message is taken, or where it should go instead. At most 1000 bytes.
+    pub note: Option<String>,
+}
+
+/// Lists the inbox: messages the owner left on this machine for Grok Bot, newest first, without
+/// bodies. Read each message you may take with GET /v1/inbox/{id}, then claim it, so that no other
+/// bot takes it as well. Claim only messages that match the conversation you are in.
+#[utoipa::path(get, path = "/v1/inbox", tag = "inbox", params(InboxQuery),
+    responses(
+        (status = 200, description = "The messages that match", body = InboxList),
+        (status = 400, description = "Invalid `state` or `limit`", body = ErrorBody),
+        (status = 403, description = "The token is limited to models", body = ErrorBody),
+    ))]
+async fn list_inbox(
+    State(app): State<AppState>,
+    q: Result<Query<InboxQuery>, QueryRejection>,
+) -> Result<Json<InboxList>, ApiError> {
+    let q = query(q)?;
+    let state = match q.state.as_deref().unwrap_or("unread") {
+        "unread" => Some(inbox::State::Unread),
+        "claimed" => Some(inbox::State::Claimed),
+        "released" => Some(inbox::State::Released),
+        "all" => None,
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "`state` is `{other}`; use `unread`, `claimed`, `released` or `all`."
+            )));
+        }
+    };
+    let limit = q.limit.unwrap_or(inbox::LIST_DEFAULT);
+    if !(1..=inbox::LIST_MAX).contains(&limit) {
+        return Err(ApiError::bad_request(format!(
+            "`limit` is {limit}; use a number from 1 to {}.",
+            inbox::LIST_MAX
+        )));
+    }
+    let state_dir = app.config.server.state_dir.clone();
+    let to = q.to;
+    let listing = blocking(move || {
+        inbox::list(&state_dir, state, to.as_deref(), limit).map_err(ApiError::from)
+    })
+    .await?;
+    let shown = listing.messages.len();
+    let truncated = listing.total > shown;
+    let note = if listing.total == 0 {
+        Some(
+            "No message matches this filter. Nothing is waiting for this bot under these \
+             conditions. If the owner expected one, it may be for another bot (see `to`) or \
+             in another state (see `state`)."
+                .to_owned(),
+        )
+    } else if truncated {
+        Some(format!(
+            "Showing the newest {shown} of {} messages. Pass a larger `limit` (up to {}), or \
+             narrow with `state` or `to`, to see the rest.",
+            listing.total,
+            inbox::LIST_MAX
+        ))
+    } else {
+        None
+    };
+    Ok(Json(InboxList {
+        messages: listing.messages,
+        total: listing.total,
+        truncated,
+        note,
+    }))
+}
+
+/// One inbox message with its full Markdown body. Reading changes nothing; claim the message to
+/// take it.
+#[utoipa::path(get, path = "/v1/inbox/{id}", tag = "inbox",
+    params(("id" = String, Path, description = "Message id from GET /v1/inbox")),
+    responses(
+        (status = 200, description = "The message, with its `body`", body = inbox::Message),
+        (status = 403, description = "The token is limited to models", body = ErrorBody),
+        (status = 404, description = "No message with that id", body = ErrorBody),
+    ))]
+async fn get_inbox_message(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<inbox::Message>, ApiError> {
+    let state_dir = app.config.server.state_dir.clone();
+    blocking(move || inbox::get(&state_dir, &id).map_err(ApiError::from))
+        .await
+        .map(Json)
+}
+
+/// The bytes of one attachment of an inbox message, by the name the message lists. The limits are
+/// those of a file download: at most 96 MB, and the transfer slots are shared with uploads.
+#[utoipa::path(get, path = "/v1/inbox/{id}/attachments/{name}", tag = "inbox",
+    params(
+        ("id" = String, Path, description = "Message id from GET /v1/inbox"),
+        ("name" = String, Path, description = "Attachment name, as the message lists it"),
+    ),
+    responses(
+        (status = 200, description = "The attachment's bytes", content_type = "application/octet-stream"),
+        (status = 404, description = "No message, or no attachment by that name", body = ErrorBody),
+        (status = 413, description = "`too_large`: the attachment is larger than 96 MB", body = ErrorBody),
+        (status = 429, description = "`transfers_busy`: 4 transfers are running; wait `Retry-After` seconds", body = ErrorBody),
+    ))]
+async fn get_inbox_attachment(
+    State(app): State<AppState>,
+    Path((id, name)): Path<(String, String)>,
+) -> axum::response::Response {
+    transfer::inbox_attachment(&app, id, name).await
+}
+
+/// Takes an inbox message for a bot. Read the message in full before you claim it, and claim only
+/// what matches the conversation you are in. A message addressed to another bot (`to`) cannot be
+/// taken. Taking it again as the bot that holds it changes nothing. If another bot holds it, the
+/// answer is 409 `already_claimed` and names the holder.
+#[utoipa::path(post, path = "/v1/inbox/{id}/claim", tag = "inbox",
+    params(("id" = String, Path, description = "Message id from GET /v1/inbox")),
+    request_body = InboxAction,
+    responses(
+        (status = 200, description = "Claimed; the message as it is now, without `body`", body = inbox::Message),
+        (status = 400, description = "Invalid `bot` or `note`", body = ErrorBody),
+        (status = 403, description = "The token is limited to models", body = ErrorBody),
+        (status = 404, description = "No message with that id", body = ErrorBody),
+        (status = 409, description = "`already_claimed`: another bot holds it; `addressed_to_other`: it is for a different bot", body = ErrorBody),
+    ))]
+async fn claim_inbox_message(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+    body: Result<Json<InboxAction>, JsonRejection>,
+) -> Result<Json<inbox::Message>, ApiError> {
+    let action = json(body)?;
+    let state_dir = app.config.server.state_dir.clone();
+    blocking(move || {
+        inbox::claim(
+            &state_dir,
+            &id,
+            &action.bot,
+            action.note.as_deref(),
+            std::time::SystemTime::now(),
+        )
+        .map_err(ApiError::from)
+    })
+    .await
+    .map(Json)
+}
+
+/// Gives back a message this bot had claimed, so that another bot may take it. Only the bot that
+/// holds the message may do this; the note says why, or where the message should go.
+#[utoipa::path(post, path = "/v1/inbox/{id}/release", tag = "inbox",
+    params(("id" = String, Path, description = "Message id from GET /v1/inbox")),
+    request_body = InboxAction,
+    responses(
+        (status = 200, description = "Released; the message as it is now, without `body`", body = inbox::Message),
+        (status = 400, description = "Invalid `bot` or `note`", body = ErrorBody),
+        (status = 403, description = "The token is limited to models", body = ErrorBody),
+        (status = 404, description = "No message with that id", body = ErrorBody),
+        (status = 409, description = "`not_claimed`: nobody holds it; `not_yours`: another bot holds it", body = ErrorBody),
+    ))]
+async fn release_inbox_message(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+    body: Result<Json<InboxAction>, JsonRejection>,
+) -> Result<Json<inbox::Message>, ApiError> {
+    let action = json(body)?;
+    let state_dir = app.config.server.state_dir.clone();
+    blocking(move || {
+        inbox::release(
+            &state_dir,
+            &id,
+            &action.bot,
+            action.note.as_deref(),
+            std::time::SystemTime::now(),
+        )
+        .map_err(ApiError::from)
+    })
+    .await
+    .map(Json)
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -18,6 +18,7 @@ use utoipa::ToSchema;
 
 use crate::config::{Capability, Workspace};
 use crate::error::ApiError;
+use crate::inbox;
 use crate::server::AppState;
 use crate::{files, models, paths};
 
@@ -280,10 +281,14 @@ pub async fn download(app: &AppState, path: Result<String, ApiError>) -> Respons
     })
     .await
     .unwrap_or_else(|err| Err(ApiError::internal(err)));
-    let (file, length, name, slot) = match opened {
-        Ok(opened) => opened,
-        Err(err) => return err.into_response(),
-    };
+    match opened {
+        Ok((file, length, name, slot)) => stream(file, length, &name, slot),
+        Err(err) => err.into_response(),
+    }
+}
+
+/// Sends an open file as a download. The transfer slot is held until the last byte is out.
+fn stream(file: File, length: u64, name: &str, slot: OwnedSemaphorePermit) -> Response {
     let sending = Sending {
         file: tokio::fs::File::from_std(file).take(length),
         length,
@@ -299,10 +304,37 @@ pub async fn download(app: &AppState, path: Result<String, ApiError>) -> Respons
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::CONTENT_LENGTH, length)
-        .header(header::CONTENT_DISPOSITION, disposition(&name))
+        .header(header::CONTENT_DISPOSITION, disposition(name))
         .header("x-content-type-options", "nosniff")
         .body(Body::from_stream(body))
         .unwrap_or_else(|err| ApiError::internal(err).into_response())
+}
+
+/// Downloads an attachment of an inbox message, under the limits of a file download.
+pub async fn inbox_attachment(app: &AppState, id: String, name: String) -> Response {
+    let (state_dir, slots) = (app.config.server.state_dir.clone(), app.transfers.clone());
+    let opened = tokio::task::spawn_blocking(move || {
+        let (path, attachment) =
+            inbox::attachment_file(&state_dir, &id, &name).map_err(ApiError::from)?;
+        if attachment.size > MAX_TRANSFER_BYTES {
+            return Err(ApiError::too_large(format!(
+                "`{name}` has {} bytes; a download may have at most {MAX_TRANSFER_BYTES} bytes (96 MB).",
+                attachment.size
+            )));
+        }
+        let slot = slots.try_acquire_owned().map_err(|_| busy())?;
+        let file = File::open(&path).map_err(|err| {
+            ApiError::not_found(format!("attachment `{name}` cannot be read: {err}."))
+        })?;
+        let length = file.metadata().map_err(ApiError::internal)?.len();
+        Ok((file, length, name, slot))
+    })
+    .await
+    .unwrap_or_else(|err| Err(ApiError::internal(err)));
+    match opened {
+        Ok((file, length, name, slot)) => stream(file, length, &name, slot),
+        Err(err) => err.into_response(),
+    }
 }
 
 /// A download in progress; logs its end with the bytes sent.

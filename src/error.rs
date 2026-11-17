@@ -31,6 +31,18 @@ pub struct ErrorDetail {
     pub message: String,
 }
 
+impl From<crate::inbox::Error> for ApiError {
+    fn from(err: crate::inbox::Error) -> Self {
+        use crate::inbox::Error;
+        match err {
+            Error::Invalid(message) => ApiError::bad_request(message),
+            Error::NotFound(message) => ApiError::not_found(message),
+            Error::Conflict { code, message } => ApiError::conflict(code, message),
+            Error::Storage(err) => ApiError::internal(err),
+        }
+    }
+}
+
 impl ApiError {
     pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         Self {
