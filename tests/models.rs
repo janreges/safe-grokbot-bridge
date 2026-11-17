@@ -813,6 +813,56 @@ async fn silent_streams_get_keep_alive_lines_between_events() {
 }
 
 #[tokio::test]
+async fn keep_alive_lines_do_not_end_an_event_in_progress() {
+    let up = scripted_upstream("text/event-stream", || {
+        scripted(
+            vec![Step::Send("data: a\n"), Step::Sleep(300), Step::Send("\n")],
+            None,
+        )
+    })
+    .await;
+    let timing = Timing {
+        keep_alive: Duration::from_millis(50),
+        ..Timing::default()
+    };
+    let h = harness_timed("[\"files\"]", &model_toml("qwen", "chat", &up.url, ""), timing).await;
+    let (text, failed) = read_all(chat(&h).await).await;
+    assert!(!failed, "{text:?}");
+    // The pause comes inside the event, after its complete line: the keep-alive is a comment
+    // line, which does not end the event, and the blank line from the upstream still ends it.
+    assert!(text.starts_with("data: a\n: keep-alive\n"), "{text:?}");
+    assert!(text.ends_with(": keep-alive\n\n"), "{text:?}");
+}
+
+#[tokio::test]
+async fn a_404_with_an_open_body_is_explained_in_time() {
+    // The upstream sends its status and then keeps the body open, as a stuck server does.
+    let up = upstream(Router::new().fallback(|| async {
+        let stuck = futures_util::stream::pending::<Result<axum::body::Bytes, std::io::Error>>();
+        (StatusCode::NOT_FOUND, Body::from_stream(stuck))
+    }))
+    .await;
+    let timing = Timing {
+        silence: Duration::from_secs(60),
+        ..Timing::default()
+    };
+    let h = harness_timed("[\"files\"]", &model_toml("qwen", "chat", &up.url, ""), timing).await;
+    let started = std::time::Instant::now();
+    let (status, _, body) = call(&h, "/v1/chat/completions", json!({"model": "qwen"})).await;
+    // Cloudflare gives up after about two minutes, so the explanation must not wait for the body.
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "answered after {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (StatusCode::BAD_GATEWAY, Some("upstream_misconfigured"))
+    );
+    assert!(message(&body).contains("404"), "{body}");
+}
+
+#[tokio::test]
 async fn a_stuck_answer_is_cut() {
     let timing = Timing {
         silence: Duration::from_millis(100),
