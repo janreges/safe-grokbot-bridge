@@ -6,6 +6,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use safe_grokbot_bridge::agents::{HookSpec, Launch};
 use safe_grokbot_bridge::config::{self, AgentKind, Capability, Config};
+use safe_grokbot_bridge::models::{Models, Probe, Timing};
 use safe_grokbot_bridge::tmux::Tmux;
 use safe_grokbot_bridge::{api, auth, exec, hook, paths, server, sessions, tls};
 
@@ -269,6 +270,12 @@ fn check(path: &Path) -> Result<()> {
         warnings.push("No agent command was found on PATH.".into());
     }
 
+    if !config.models.is_empty() {
+        println!("Models");
+        check_models(&rt, &config, &mut warnings)?;
+    }
+    check_config_file(path, &config, &mut warnings);
+
     println!("Workspaces");
     for ws in &config.workspaces {
         let allow: Vec<String> = ws.allow.iter().map(|c| c.to_string()).collect();
@@ -304,6 +311,111 @@ fn check(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Probes every model's upstream once, all at the same time, and prints the results in config
+/// order. Nothing found here is an error: a home GPU server may be off while `check` runs.
+fn check_models(
+    rt: &tokio::runtime::Runtime,
+    config: &Config,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    let client = std::sync::Arc::new(Models::new(config, Timing::default())?);
+    let probes: Vec<Probe> = rt.block_on(async {
+        let handles: Vec<_> = config
+            .models
+            .iter()
+            .map(|model| {
+                let (client, model) = (client.clone(), model.clone());
+                tokio::spawn(async move { client.probe(&model).await })
+            })
+            .collect();
+        let mut probes = Vec::new();
+        for handle in handles {
+            probes.push(
+                handle
+                    .await
+                    .unwrap_or_else(|err| Probe::Unreachable(err.to_string())),
+            );
+        }
+        probes
+    });
+    for (model, probe) in config.models.iter().zip(probes) {
+        let table = format!("[models.{}]", model.name);
+        let result = match probe {
+            Probe::Ok => "ok".to_string(),
+            Probe::Unreachable(reason) => {
+                warnings.push(format!(
+                    "{table}: the upstream cannot be reached ({reason}). Check `url` and that the server runs; until then calls answer `upstream_unreachable`."
+                ));
+                "unreachable".into()
+            }
+            Probe::KeyRejected => {
+                warnings.push(format!(
+                    "{table}: the upstream rejects the configured key (HTTP 401 or 403). Check `api_key`; until then calls answer `upstream_auth_failed`."
+                ));
+                "key rejected".into()
+            }
+            Probe::UnknownModel { listed } => {
+                let known = if listed.is_empty() {
+                    String::new()
+                } else {
+                    format!(" It lists: {}.", listed.join(", "))
+                };
+                warnings.push(format!(
+                    "{table}: the upstream does not know the model `{}`; check `model`.{known}",
+                    model.upstream_model
+                ));
+                "model not found upstream".into()
+            }
+            Probe::Unverifiable(status) => {
+                warnings.push(format!(
+                    "{table}: the model could not be verified, because the upstream answers HTTP {status} to a model list request. If calls fail with `upstream_misconfigured`, check `url`."
+                ));
+                format!("not verifiable (HTTP {status})")
+            }
+        };
+        println!(
+            "  {:<12} {:<15} {:<9} {}, model {}: {result}",
+            model.name,
+            model.kind.as_str(),
+            match model.api {
+                config::ModelApi::Openai => "openai",
+                config::ModelApi::Anthropic => "anthropic",
+            },
+            model.url,
+            model.upstream_model,
+        );
+    }
+    Ok(())
+}
+
+/// The config file can hold API keys: warn when clients or other users might read it.
+fn check_config_file(path: &Path, config: &Config, warnings: &mut Vec<String>) {
+    let Some(canonical) = &config.canonical_path else {
+        return;
+    };
+    if let Some(ws) = paths::workspace_for(config, canonical) {
+        warnings.push(format!(
+            "The config file {} lies in workspace `{}`. The bridge never serves it, but agents working there can read it; move it outside the workspaces, together with any copies.",
+            path.display(),
+            ws.name
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let has_keys = config.models.iter().any(|m| m.api_key.is_some());
+        if let Ok(metadata) = std::fs::metadata(canonical)
+            && has_keys
+            && metadata.permissions().mode() & 0o044 != 0
+        {
+            warnings.push(format!(
+                "The config file holds API keys and other users of this machine can read it. Run `chmod 600 {}`.",
+                path.display()
+            ));
+        }
+    }
 }
 
 fn launch(path: &Path, agent_name: &str, extra: Vec<String>) -> Result<()> {

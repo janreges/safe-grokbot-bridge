@@ -911,6 +911,7 @@ listen = "{DEFAULT_LISTEN}"
 [[tokens]]
 name = "{token_name}"
 sha256 = "{token_hash}"
+# models_only = true                  # may call the models below and nothing else
 
 [limits]
 # auth_failures = 10                  # failed logins per client IP within auth_window_secs …
@@ -918,6 +919,7 @@ sha256 = "{token_hash}"
 # auth_block_secs = 900               # … block the IP this long
 # requests_per_minute = 300           # per token
 # max_sessions = 8                    # sessions started by the bridge running at once
+# max_model_requests = 16             # model calls running at once
 
 [sessions]
 # runner = "auto"                     # auto (tmux when available) | tmux | headless
@@ -931,6 +933,30 @@ sha256 = "{token_hash}"
 # args = ["--model", "opus"]
 # [agents.codex]
 # env = {{ CODEX_HOME = "/home/me/.codex" }}
+
+# Models clients may call through the bridge with OpenAI- or Anthropic-compatible requests. The
+# table name is the name clients send as `model`. Once this file holds an `api_key`, keep it and
+# its copies outside the workspaces and readable only by you (chmod 600).
+# [models.qwen]
+# type = "chat"                       # chat, vision, embedding, reranker, speech-to-text, text-to-speech, image-generator
+# url = "http://10.0.0.5:8000/v1"     # base URL of an OpenAI-compatible server such as vLLM
+# model = "Qwen/Qwen3-32B"            # the upstream's name (default: the table name)
+# description = "Local Qwen3 32B, fast. Thinking is off unless you turn it on."
+# defaults = {{ chat_template_kwargs = {{ enable_thinking = false }} }}
+#
+# [models.embed]
+# type = "embedding"
+# url = "http://10.0.0.5:8001/v1"
+# model = "Qwen/Qwen3-Embedding-4B"
+# defaults = {{ dimensions = 1024 }}    # for models with Matryoshka embeddings
+#
+# [models.opus]
+# type = "chat"
+# api = "anthropic"
+# url = "https://api.anthropic.com/v1"
+# model = "claude-opus-5-5"
+# api_key = "sk-ant-..."
+# tokens = ["{token_name}"]                   # only these tokens may call it
 
 [[workspaces]]
 path = {workspace}
@@ -1048,6 +1074,23 @@ mod tests {
         let cfg = Config::parse(&text, Path::new("t.toml")).unwrap();
         assert_eq!(cfg.tokens[0].name, "grok");
         assert!(!cfg.workspaces[0].allows(Capability::Start));
+        assert!(cfg.models.is_empty());
+        // The commented model examples are valid once uncommented.
+        let start = text.find("# [models.").unwrap();
+        let end = text.find("[[workspaces]]").unwrap();
+        let examples: Vec<&str> = text[start..end]
+            .lines()
+            .map(|line| line.strip_prefix("# ").unwrap_or(line))
+            .collect();
+        let text = format!(
+            "{}{}\n{}",
+            &text[..start],
+            examples.join("\n"),
+            &text[end..]
+        );
+        let cfg = Config::parse(&text, Path::new("t.toml")).unwrap();
+        assert_eq!(cfg.models.len(), 3, "{text}");
+        assert_eq!(cfg.model("embed").unwrap().defaults["dimensions"], 1024);
     }
 
     const BRAIN: &str = "[[tokens]]\nname = \"brain\"\nsha256 = \"1111111111111111111111111111111111111111111111111111111111111111\"\nmodels_only = true\n";

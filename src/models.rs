@@ -63,6 +63,21 @@ impl Default for Timing {
     }
 }
 
+/// What `check` learned about a model's upstream.
+#[derive(Debug, PartialEq)]
+pub enum Probe {
+    Ok,
+    Unreachable(String),
+    /// The upstream answered 401 or 403 to the configured key.
+    KeyRejected,
+    /// The upstream answers, but does not know the model; `listed` holds up to ten it knows.
+    UnknownModel {
+        listed: Vec<String>,
+    },
+    /// The upstream has no model list, so the model could not be checked; the HTTP status.
+    Unverifiable(u16),
+}
+
 /// The HTTP client and the slots shared by all model calls.
 pub struct Models {
     client: reqwest::Client,
@@ -87,6 +102,52 @@ impl Models {
             slots: Arc::new(Semaphore::new(config.limits.max_model_requests)),
             timing,
         })
+    }
+
+    /// Asks a model's upstream once, with the configured key, whether it knows the model. Used
+    /// by `check`; takes at most 5 seconds.
+    pub async fn probe(&self, model: &Model) -> Probe {
+        let url = match model.api {
+            ModelApi::Openai => format!("{}/models", model.url),
+            // Anthropic's model list is paginated, so the probe asks for the one model.
+            ModelApi::Anthropic => format!("{}/models/{}", model.url, model.upstream_model),
+        };
+        let request = authorize(self.client.get(url), model, &HeaderMap::new());
+        let answer = async {
+            let response = request.send().await?;
+            let status = response.status();
+            let body = response.bytes().await.unwrap_or_default();
+            Ok::<_, reqwest::Error>((status, body))
+        };
+        let (status, body) = match tokio::time::timeout(Duration::from_secs(5), answer).await {
+            Err(_) => return Probe::Unreachable("no answer within 5 seconds".into()),
+            Ok(Err(err)) => return Probe::Unreachable(causes(&err)),
+            Ok(Ok(answer)) => answer,
+        };
+        match (model.api, status.as_u16()) {
+            (_, 401 | 403) => Probe::KeyRejected,
+            (ModelApi::Anthropic, 200) => Probe::Ok,
+            (ModelApi::Anthropic, 404) => Probe::UnknownModel { listed: vec![] },
+            (ModelApi::Openai, 200) => {
+                let Ok(list) = serde_json::from_slice::<Value>(&body) else {
+                    return Probe::Unverifiable(200);
+                };
+                let ids: Vec<String> = list["data"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry["id"].as_str().map(str::to_string))
+                    .collect();
+                if ids.contains(&model.upstream_model) {
+                    Probe::Ok
+                } else {
+                    Probe::UnknownModel {
+                        listed: ids.into_iter().take(10).collect(),
+                    }
+                }
+            }
+            (_, status) => Probe::Unverifiable(status),
+        }
     }
 
     async fn slot(&self) -> Option<OwnedSemaphorePermit> {
@@ -675,18 +736,7 @@ fn unreachable(model: &Model, err: &reqwest::Error) -> ApiError {
             ),
         );
     }
-    // The error's own text names the upstream URL, which stays private; its causes do not.
-    let mut causes = Vec::new();
-    let mut source = std::error::Error::source(err);
-    while let Some(cause) = source {
-        causes.push(cause.to_string());
-        source = cause.source();
-    }
-    let reason = if causes.is_empty() {
-        "the connection failed".to_string()
-    } else {
-        causes.join(": ")
-    };
+    let reason = causes(err);
     ApiError::new(
         StatusCode::BAD_GATEWAY,
         "upstream_unreachable",
@@ -695,6 +745,22 @@ fn unreachable(model: &Model, err: &reqwest::Error) -> ApiError {
             model.name, model.name
         ),
     )
+}
+
+/// Why a request failed. The error's own text names the upstream URL, which stays private; its
+/// causes do not.
+fn causes(err: &reqwest::Error) -> String {
+    let mut causes = Vec::new();
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        causes.push(cause.to_string());
+        source = cause.source();
+    }
+    if causes.is_empty() {
+        "the connection failed".to_string()
+    } else {
+        causes.join(": ")
+    }
 }
 
 /// The bridge's own answer for an upstream failure. Client libraries retry a 5xx twice unless

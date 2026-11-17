@@ -982,3 +982,107 @@ async fn a_transcription_form_is_rebuilt_for_the_upstream() {
     assert!(message(&body).contains("96 MB"), "{body}");
     assert_eq!(up.count(), 2);
 }
+
+#[tokio::test]
+async fn probes_tell_the_states_of_an_upstream_apart() {
+    use axum::routing::get;
+    use safe_grokbot_bridge::config::Config;
+    use safe_grokbot_bridge::models::{Models, Probe};
+
+    let up = upstream(
+        Router::new()
+            .route(
+                "/v1/models",
+                get(|headers: HeaderMap| async move {
+                    if headers
+                        .get("authorization")
+                        .is_none_or(|v| v != "Bearer good")
+                    {
+                        return StatusCode::UNAUTHORIZED.into_response();
+                    }
+                    Json(json!({"data": [{"id": "Qwen/Qwen3-32B"}, {"id": "other"}]}))
+                        .into_response()
+                }),
+            )
+            .route(
+                "/a/models/claude-x",
+                get(|headers: HeaderMap| async move {
+                    if headers.get("x-api-key").is_none_or(|v| v != "good") {
+                        return StatusCode::UNAUTHORIZED.into_response();
+                    }
+                    if headers.get("anthropic-version").is_none() {
+                        return StatusCode::BAD_REQUEST.into_response();
+                    }
+                    Json(json!({"id": "claude-x"})).into_response()
+                }),
+            ),
+    )
+    .await;
+    let base = up.url.trim_end_matches("/v1").to_string();
+    let closed = format!("http://127.0.0.1:{}/v1", closed_port());
+    let models = [
+        (
+            "ok",
+            format!("{base}/v1"),
+            "Qwen/Qwen3-32B",
+            "good",
+            "openai",
+        ),
+        (
+            "badkey",
+            format!("{base}/v1"),
+            "Qwen/Qwen3-32B",
+            "bad",
+            "openai",
+        ),
+        ("absent", format!("{base}/v1"), "absent", "good", "openai"),
+        ("nolist", format!("{base}/none"), "x", "good", "openai"),
+        ("down", closed, "x", "good", "openai"),
+        (
+            "claude",
+            format!("{base}/a"),
+            "claude-x",
+            "good",
+            "anthropic",
+        ),
+        (
+            "missing",
+            format!("{base}/a"),
+            "missing",
+            "good",
+            "anthropic",
+        ),
+    ];
+    let mut text = format!(
+        "[[tokens]]\nname = \"t\"\nsha256 = \"{}\"\n[[workspaces]]\npath = {}\n",
+        "0".repeat(64),
+        common::toml_str(&std::env::temp_dir())
+    );
+    for (name, url, model, key, api) in &models {
+        text.push_str(&model_toml(
+            name,
+            "chat",
+            url,
+            &format!("model = \"{model}\"\napi_key = \"{key}\"\napi = \"{api}\""),
+        ));
+    }
+    let config = Config::parse(&text, std::path::Path::new("t.toml")).unwrap();
+    let client = Models::new(&config, Timing::default()).unwrap();
+    let probe = |name: &str| client.probe(config.model(name).unwrap());
+
+    assert_eq!(probe("ok").await, Probe::Ok);
+    assert_eq!(probe("badkey").await, Probe::KeyRejected);
+    assert_eq!(
+        probe("absent").await,
+        Probe::UnknownModel {
+            listed: vec!["Qwen/Qwen3-32B".into(), "other".into()]
+        }
+    );
+    assert_eq!(probe("nolist").await, Probe::Unverifiable(404));
+    assert!(matches!(probe("down").await, Probe::Unreachable(_)));
+    assert_eq!(probe("claude").await, Probe::Ok);
+    assert_eq!(
+        probe("missing").await,
+        Probe::UnknownModel { listed: vec![] }
+    );
+}
