@@ -37,7 +37,8 @@ The full threat model is in [docs/design.md](docs/design.md#6-security-model).
   the bridge generates, in the workspace's incoming folder `.sgb-inbox/`, never replacing a file.
   `download` (files of any kind) is separate from `files` (text only). Both are off by default.
 - Upstream API keys for the models behind the bridge stay in the config. Clients never see them,
-  and the file endpoints never serve the config file.
+  and the file endpoints never serve the config file, under any name it has: a hard link to it is
+  refused, and git refuses a repository that contains it.
 - The bridge never runs arbitrary commands. Git and agents are started from argument vectors
   (never a shell) with validated arguments. Git runs without the pager, fsmonitor, external diff
   drivers, textconv, filter drivers and submodule recursion, so a repository's own configuration
