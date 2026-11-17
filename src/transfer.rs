@@ -638,6 +638,14 @@ mod tests {
     }
 
     #[test]
+    fn dispositions_quote_nothing_a_header_could_break_on() {
+        assert_eq!(
+            disposition("zpráva \"x\" a\\b\t.pdf"),
+            "attachment; filename=\"zpr_va _x_ a_b_.pdf\"; filename*=UTF-8''zpr%C3%A1va%20%22x%22%20a%5Cb%09.pdf"
+        );
+    }
+
+    #[test]
     fn extensions_are_sanitized() {
         let cases = [
             ("data.zip", "zip"),

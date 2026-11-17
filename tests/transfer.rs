@@ -453,13 +453,15 @@ async fn a_download_arrives_byte_for_byte() {
     );
     assert_eq!(bytes_of(response).await, data);
 
-    let odd = h.root.join("zpráva \"x\".pdf");
+    // A name that is valid on every platform; quotes and backslashes are covered in the unit
+    // tests of `disposition`, because Windows does not allow them in file names.
+    let odd = h.root.join("zpráva 1.pdf");
     std::fs::write(&odd, b"%PDF").unwrap();
     let response = download(&h, &odd).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()["content-disposition"],
-        "attachment; filename=\"zpr_va _x_.pdf\"; filename*=UTF-8''zpr%C3%A1va%20%22x%22.pdf"
+        "attachment; filename=\"zpr_va 1.pdf\"; filename*=UTF-8''zpr%C3%A1va%201.pdf"
     );
 }
 
