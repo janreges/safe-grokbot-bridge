@@ -320,7 +320,11 @@ mod tests {
         let cfg = config_at(&repo.join("bridge.toml"), &[(&repo, "[\"git\"]")]);
         let err = require_git_scope(&cfg, &repo, &[repo.join(".git")]).unwrap_err();
         assert_eq!(err.code, "forbidden");
-        assert!(err.message.contains("configuration file"), "{}", err.message);
+        assert!(
+            err.message.contains("configuration file"),
+            "{}",
+            err.message
+        );
     }
 
     #[cfg(unix)]

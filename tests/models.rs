@@ -825,7 +825,12 @@ async fn keep_alive_lines_do_not_end_an_event_in_progress() {
         keep_alive: Duration::from_millis(50),
         ..Timing::default()
     };
-    let h = harness_timed("[\"files\"]", &model_toml("qwen", "chat", &up.url, ""), timing).await;
+    let h = harness_timed(
+        "[\"files\"]",
+        &model_toml("qwen", "chat", &up.url, ""),
+        timing,
+    )
+    .await;
     let (text, failed) = read_all(chat(&h).await).await;
     assert!(!failed, "{text:?}");
     // The pause comes inside the event, after its complete line: the keep-alive is a comment
@@ -846,7 +851,12 @@ async fn a_404_with_an_open_body_is_explained_in_time() {
         silence: Duration::from_secs(60),
         ..Timing::default()
     };
-    let h = harness_timed("[\"files\"]", &model_toml("qwen", "chat", &up.url, ""), timing).await;
+    let h = harness_timed(
+        "[\"files\"]",
+        &model_toml("qwen", "chat", &up.url, ""),
+        timing,
+    )
+    .await;
     let started = std::time::Instant::now();
     let (status, _, body) = call(&h, "/v1/chat/completions", json!({"model": "qwen"})).await;
     // Cloudflare gives up after about two minutes, so the explanation must not wait for the body.
