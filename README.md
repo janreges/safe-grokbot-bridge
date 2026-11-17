@@ -100,6 +100,10 @@ flowchart LR
 - **Made for LLM clients.** A complete [OpenAPI 3.1](docs/openapi.json) description. Every
   response says when it is incomplete and what to do next, and a
   [ready-made skill](docs/grok-bot.md) teaches Grok Bot to use it and to connect new machines.
+- **Inbox for Grok Bot.** The owner leaves tasks and follow-ups on the machine with
+  `safe-grokbot-bridge inbox send`. A bot takes them through the API when the owner asks it to,
+  claims the ones that match its conversation, and gives back the rest. See
+  [docs/grok-bot.md](docs/grok-bot.md#leaving-messages-in-the-inbox).
 - **One binary** for Linux, macOS and Windows. Configuration is one TOML file.
 
 ## Quick start

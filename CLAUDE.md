@@ -16,6 +16,8 @@ own machines:
   and Anthropic client libraries, while the upstream API keys stay in the config;
 - pass files both ways: upload files into a workspace's incoming folder and download files of
   any kind.
+- leave messages for a bot in an inbox, which the bot reads and claims through the API when the
+  owner asks it to.
 
 One binary runs per machine as a daemon. It is reached through a Cloudflare Tunnel, or directly on
 a public IP using a self-signed certificate with public-key pinning. Every request needs a bearer
@@ -97,6 +99,7 @@ A test fails when `docs/openapi.json` is out of date, so regenerate it after any
 | `src/models.rs` | Models behind the bridge: endpoint table, selection, defaults, relay, probes |
 | `src/transfer.rs` | File transfer: uploads into a workspace's incoming folder, downloads |
 | `src/hook.rs` | `hook` subcommand: agent turn-complete events |
+| `src/inbox.rs` | Inbox: messages left for Grok Bot in the state directory; claim, release, attachments |
 | `src/procs.rs`, `src/exec.rs` | Process inspection and subprocess helpers |
 | `tests/` | Integration tests using fake agents |
 | `skills/safe-grokbot-bridge/` | Agent skill for setting up the bridge; `.claude-plugin/marketplace.json` publishes it to Claude Code and Codex |

@@ -40,7 +40,7 @@ authenticates the client, so it becomes the one door to the models as well (§9)
 - No MCP endpoint. Grok Bot reaches HTTP APIs through `curl` on its cloud computer, and other
   clients can use the same REST API.
 - No outbound notifications. Clients long-poll a session instead. A webhook to Grok routines
-  (`https://api2.cursor.sh/automations/webhook/<id>`) is planned (§15).
+  (`https://api2.cursor.sh/automations/webhook/<id>`) is planned (§16).
 - No multi-machine federation. Each machine runs its own bridge, and the client keeps a list.
 - No generic HTTP proxy. A client names a model, never a URL, and reaches only the upstream paths
   of a fixed table (§9).
@@ -408,6 +408,11 @@ the file and git endpoints.
 | `DELETE /v1/sessions/{id}` | input | stop a session the bridge started |
 | `GET /v1/files/download?path=` | download | download a file of any kind, up to 96 MB (§10.2) |
 | `POST /v1/files/upload?dir=` | upload | store files in the workspace's incoming folder (§10.1) |
+| `GET /v1/inbox?state=&to=&limit=` | any but `models_only` | messages left for Grok Bot, without bodies (§11.4) |
+| `GET /v1/inbox/{id}` | any but `models_only` | one inbox message with its body |
+| `GET /v1/inbox/{id}/attachments/{name}` | any but `models_only` | an inbox attachment (§11.4) |
+| `POST /v1/inbox/{id}/claim` | any but `models_only` | take a message for a bot (§11.2) |
+| `POST /v1/inbox/{id}/release` | any but `models_only` | give a message back; only the holder may (§11.2) |
 | `GET /v1/models?type=` | any token | the models this token may call (§9.2) |
 | `POST /v1/chat/completions` | model's `tokens` | `chat` and `vision` models with `api = "openai"` |
 | `POST /v1/messages` | model's `tokens` | `chat` and `vision` models with `api = "anthropic"` |
@@ -828,7 +833,85 @@ line with the number of files, their total size and the incoming folder; every d
 when it ends, with the bytes sent and whether the file was complete. Client file names and
 contents are never logged.
 
-## 11. CLI
+## 11. Inbox
+
+The owner, or an agent on the same machine, leaves messages for Grok Bot. A bot picks them up when
+the owner asks it in a chat ("look in the bridge inbox"). Nothing pushes to a bot: a webhook
+routine has no access to the chat, so it cannot choose messages by topic (§16). Code:
+`src/inbox.rs`, the `/v1/inbox` handlers in `src/api.rs`, and the `inbox` subcommand.
+
+A message has one of two kinds. A `task` is new work: the bot first picks the most suitable bot for
+it, which may be itself. A `followup` is input for an agenda a bot already works on: the bot finds
+the earlier discussion and continues there.
+
+### 11.1 Storage
+
+A message is a folder `<state_dir>/inbox/<id>/`, outside every workspace, so the file endpoints
+never reach it. The id is the UTC time and four random characters, such as
+`2026-11-17.16-40-12.k7q2`, and the folder holds:
+
+- `message.json`: the manifest. It has the id, the creation time in UTC, the kind, the subject,
+  the project folder, the bot the message is for (`to`), the state, the attachments with name,
+  size and SHA-256, and the claim and release history. The manifest is written last, through a
+  temporary file and a rename, so a listing never shows a half-written message.
+- `body.md`: the Markdown body, at most 256 KB.
+- `attachments/<n>`: the attached files, stored under their index. A name the sender gave is only
+  ever shown, never used as a path.
+
+Folders are created with mode 0700 and files with 0600, as uploads are. A lock file,
+`inbox/.lock`, serializes every change, so the CLI and the running bridge can both write.
+
+### 11.2 States
+
+A message is `unread`, until a bot `claim`s it; then it is `claimed` by that bot. A bot gives it
+back with `release`, and it becomes `released`, and any bot may claim it again. Only the holder can
+release. A second claim gets 409 `already_claimed` and names the holder. A message with `to` set can
+be claimed only by that bot. Reading changes nothing; the claim is the "marked as read" step.
+
+### 11.3 Writing (CLI, this machine only)
+
+`safe-grokbot-bridge inbox send --kind task|followup --subject <line> [--body-file <file>]
+[--project <dir>] [--to <bot>] [--attach <file>]…` stores a message. The body is read from
+`--body-file`, or from stdin. `--project` defaults to the current folder when it lies in a workspace.
+`inbox list [--all]` shows the open messages, or all of them, `inbox show <id>` prints one in full,
+and `inbox delete <id>` removes one with its attachments. The subject is one line of at most 200
+bytes; a message takes at most 20 attachments and 96 MB in all. No HTTP endpoint writes messages.
+The only write the API offers is still the upload (§10.1).
+
+### 11.4 Reading and claiming (API)
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/inbox?state=&to=&limit=` | the messages, newest first, without bodies; `state` is `unread` (default), `claimed`, `released` or `all`; `to` shows the messages for that bot and for every bot; `limit` is 1–200 (default 50); the answer says whether it is `truncated` and what to do next |
+| `GET /v1/inbox/{id}` | one message with its `body` |
+| `GET /v1/inbox/{id}/attachments/{name}` | an attachment, with the file download's limits (§10.2) |
+| `POST /v1/inbox/{id}/claim` `{"bot", "note"}` | take the message for a bot |
+| `POST /v1/inbox/{id}/release` `{"bot", "note"}` | give it back; only the bot that holds it may |
+
+Any token except a `models_only` one may use the inbox. The inbox never touches workspaces, git or
+sessions, so a workspace's `allow` list does not apply to it.
+
+### 11.5 Limits and security
+
+- A bot's name is free text chosen by the token holder: 1 to 64 characters, no control characters.
+  The bridge trusts the holder to name the bot honestly, as it trusts the holder with everything
+  else the token reaches.
+- The inbox is shared by every token that may use it. Put in a message only what all the bots of
+  the bridge may read.
+- The audit log records each request with its token name, as for every request. A message's body
+  and attachments are never written to a log.
+- A claim is atomic under the lock: when two bots race for one message, one of them gets 409.
+
+### 11.6 How a bot uses it
+
+The protocol is written into the client skill (`skills/safe-grokbot-bridge-client`) and into
+`docs/grok-bot.md`. On the owner's request the bot lists the `unread` messages and the `released`
+ones. If the owner gave a topic, the bot claims only the messages that match the conversation it is
+in and leaves the others untouched. Without a topic it lists the subjects and asks which to take.
+It reads a message in full before it claims it. A `task` for another bot is released again with a
+note that names the bot it belongs to.
+
+## 12. CLI
 
 | Command | Purpose |
 |---|---|
@@ -836,11 +919,12 @@ contents are never logged.
 | `init [--config] [--workspace <dir>]` | write a config template with a new token and commented model examples, print next steps |
 | `token [--name]` | generate a token, print it and the `[[tokens]]` snippet |
 | `check [--config]` | validate the config and environment: tmux, agents, git, TLS pin, each model's upstream (reachable, key accepted, model known, 5 s per model), warnings (also when the config file lies in a workspace or is readable by others while it holds keys) |
+| `inbox send`, `inbox list`, `inbox show`, `inbox delete` | leave a message for Grok Bot in the inbox, or list, show or delete messages (§11) |
 | `openapi` | print the OpenAPI document |
 | `launch <agent> [-- args…]` | start an agent in a new tmux session in the current folder and attach, so the bridge can reach it |
 | `hook <agent> <file> [payload]` | internal: record a turn-complete event (used by agent hooks) |
 
-## 12. Platform support
+## 13. Platform support
 
 | Feature | Linux | macOS | Windows |
 |---|---|---|---|
@@ -854,7 +938,7 @@ contents are never logged.
 
 WSL 2 counts as Linux. A bridge inside WSL sees only the agents inside WSL.
 
-## 13. Testing strategy
+## 14. Testing strategy
 
 Focus on behaviour that would hurt if it broke:
 
@@ -900,7 +984,7 @@ conversation saved in YOLO mode without `bypass_permissions`, and a tmux session
 
 Not checked by hand: native Windows with psmux, and macOS.
 
-## 14. Operational notes
+## 15. Operational notes
 
 - Run the bridge as the same OS user that runs the agents and owns the tmux server.
 - When the bridge stops, open requests get 10 s to finish (long-polls are cut short), then it
@@ -916,7 +1000,7 @@ Not checked by hand: native Windows with psmux, and macOS.
 - The first launch of an agent in a new folder may show a trust dialog. Clients answer it with
   keys (`Enter`).
 
-## 15. Future work
+## 16. Future work
 
 - Push notifications to Grok routines when a session finishes or waits for input.
 - An MCP endpoint (Streamable HTTP) for clients that prefer tools over REST.

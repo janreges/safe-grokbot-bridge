@@ -458,6 +458,11 @@ machine, delete `bridge-token.txt` and check that it is gone. If the clipboard k
 - `tmux attach -t <id>` shows a session the bot started; its id is the tmux session name. Add
   `-L <socket>` when the config sets `[sessions] tmux_socket`.
 - `safe-grokbot-bridge check` shows what is exposed right now.
+- `safe-grokbot-bridge inbox send --kind task --subject "…" --body-file <file>` leaves a message
+  for the bots (`--kind followup` for work already under way, `--to <bot>` for one bot,
+  `--attach <file>` up to 20 times). A bot takes it only when the owner asks it in a chat to look
+  in the inbox. `inbox list` shows the open messages, `inbox show <id>` one in full, and
+  `inbox delete <id>` removes one.
 
 ## 8. Upgrade
 

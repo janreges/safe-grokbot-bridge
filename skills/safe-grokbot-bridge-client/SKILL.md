@@ -171,6 +171,30 @@ sgbdl pc1 /home/me/projects/app/dist/report.pdf /tmp/report.pdf
 - Uploads stay on my machine until someone deletes them. Do not upload secrets you were not
   asked to pass on.
 
+## Inbox
+
+The owner leaves messages for the bots in the bridge's inbox, with `safe-grokbot-bridge inbox send`
+on the machine. A message waits there until a bot takes it. Look only when the owner asks you to
+(for example "look in the bridge inbox"), and take only the messages that fit the conversation you
+are in. Use your own bot name, as the owner knows it, for example `Homelab`; in a URL, write a space
+as `%20`, as in `Chief%20of%20Staff`:
+
+1. **List.** `sgb <machine> GET "/v1/inbox?state=unread&to=<your bot name>"`, then the same with
+   `state=released` for messages a bot gave back. Each entry has the id, the kind (`task` or
+   `followup`), the subject, the project folder and the claim history.
+2. **Read in full.** `sgb <machine> GET /v1/inbox/<id>` returns the Markdown `body` and the list of
+   attachments. Fetch an attachment from `/v1/inbox/<id>/attachments/<name>` with `sgbf` (see Files).
+3. **Decide.** A `followup` belongs to a discussion that is already under way: find that discussion
+   first. A `task` belongs to the most suitable bot; if that is not you, give it back.
+4. **Claim** what matches the current conversation: write `{"bot": "<your bot name>", "note": "<why>"}`
+   to a temporary file and run `sgb <machine> POST /v1/inbox/<id>/claim <file>`. A 409
+   `already_claimed` means another bot holds the message; leave it.
+5. **Give back** a message that belongs to another bot: `sgb <machine> POST /v1/inbox/<id>/release
+   <file>` with the same body, and a note that names the bot it belongs to.
+
+Never claim a message you have not read in full, and never claim one only because it is there.
+Leave the messages that do not match untouched. Tell the owner what you took and what you left.
+
 ## Rules
 
 - **Send each message once.** If a request was slow or a wait ended while the agent still works,

@@ -122,6 +122,26 @@ pass files to each other, up to 96 MB per request:
 The client skill has `curl` helpers for both. Uploads stay until someone deletes them on the
 machine.
 
+## Leaving messages in the inbox
+
+The owner can leave a message for the bots on a machine:
+`safe-grokbot-bridge inbox send --kind task|followup --subject "…" --body-file <file>`, run on that
+machine. A `task` is new work, which the bots give to the most suitable one. A `followup` belongs to
+a discussion that is already under way. The message waits in the bridge's inbox until a bot takes
+it.
+
+Nothing pushes messages to a bot. The bot picks them up when the owner asks in a chat, for example
+"look in the bridge inbox", optionally with a topic. The bot then claims only the messages that fit
+that conversation, marks them as taken with `claim`, and leaves the rest untouched. The protocol is
+in the client skill.
+
+A bot needs the same URL and token as above, stored as `SGB_<MACHINE>_URL` and
+`SGB_<MACHINE>_TOKEN` in its secret card. Without the URL the bot cannot reach the bridge at all,
+so the inbox does not work for it.
+
+Webhook routines do not take part. A routine started by a webhook does not see the owner's chat, so
+it cannot choose messages by topic (design §11 and §16).
+
 ## Tips
 
 - Name your tmux-started sessions' folders well: session ids are built from the folder name and

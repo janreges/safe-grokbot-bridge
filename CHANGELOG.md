@@ -6,6 +6,17 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- An inbox for Grok Bot. The owner leaves messages on the machine with
+  `safe-grokbot-bridge inbox send`: `--kind task` for new work or `followup` for work already
+  under way, a subject, a Markdown body from `--body-file` or stdin, and optionally a project
+  folder, a target bot (`--to`) and up to 20 attachments. `inbox list`, `inbox show` and
+  `inbox delete` manage them. A bot reads messages with `GET /v1/inbox` and
+  `GET /v1/inbox/{id}`, downloads attachments from `GET /v1/inbox/{id}/attachments/{name}`, takes
+  one with `POST /v1/inbox/{id}/claim` (a 409 names the bot that holds it) and gives it back with
+  `POST /v1/inbox/{id}/release`. Messages live in the state directory, outside every workspace.
+
 ## [0.4.0] - 2026-11-17
 
 ### Added
