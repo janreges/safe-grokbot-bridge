@@ -90,12 +90,12 @@ pub async fn upload(app: &AppState, dir: Result<String, ApiError>, request: Requ
             let (app, slots) = (app.clone(), app.transfers.clone());
             tokio::task::spawn_blocking(move || {
                 let resolved = paths::resolve(&app.config, &dir)?;
+                paths::require(resolved.workspace, Capability::Upload)?;
                 if !resolved.path.is_dir() {
                     return Err(ApiError::bad_request(format!(
                         "`{dir}` is not a folder. Pass a folder in `dir`, such as a session's `cwd`."
                     )));
                 }
-                paths::require(resolved.workspace, Capability::Upload)?;
                 if !is_form {
                     return Err(ApiError::bad_request(
                         "An upload is a multipart form (`multipart/form-data`) with one part per file, as `curl -F 'file=@report.pdf'` sends it. Nothing was stored.",

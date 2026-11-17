@@ -221,6 +221,11 @@ async fn uploads_are_refused_with_a_reason() {
             .contains("`upload`"),
         "{body}"
     );
+    // Without `upload`, the answer does not tell a file from a folder.
+    let sessions_only = harness("[\"sessions\"]", "").await;
+    std::fs::write(sessions_only.root.join("notes.txt"), "x").unwrap();
+    let (status, body) = upload(&sessions_only, &sessions_only.root.join("notes.txt"), file).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 }
 
 #[cfg(unix)]
