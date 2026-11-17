@@ -60,6 +60,8 @@ struct RawConfig {
     #[serde(default)]
     agents: BTreeMap<String, RawAgent>,
     #[serde(default)]
+    models: BTreeMap<String, RawModel>,
+    #[serde(default)]
     workspaces: Vec<RawWorkspace>,
 }
 
@@ -87,6 +89,8 @@ struct RawTls {
 struct RawToken {
     name: String,
     sha256: String,
+    #[serde(default)]
+    models_only: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -107,6 +111,20 @@ struct RawAgent {
     env: Option<BTreeMap<String, String>>,
     headless_args: Option<Vec<String>>,
     bypass_args: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawModel {
+    r#type: ModelType,
+    #[serde(default)]
+    api: ModelApi,
+    url: String,
+    model: Option<String>,
+    api_key: Option<String>,
+    defaults: Option<toml::Table>,
+    tokens: Option<Vec<String>>,
+    description: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -136,6 +154,8 @@ pub struct Config {
     pub experimental: Experimental,
     /// Built-in agents first (claude, codex, hermes), then extra agents by name.
     pub agents: Vec<Agent>,
+    /// Models behind the bridge, by name.
+    pub models: Vec<Model>,
     pub workspaces: Vec<Workspace>,
 }
 
@@ -159,6 +179,8 @@ pub struct TlsSettings {
 pub struct Token {
     pub name: String,
     pub sha256: [u8; 32],
+    /// The token may call the model endpoints and nothing else.
+    pub models_only: bool,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -169,6 +191,7 @@ pub struct Limits {
     pub auth_block_secs: u64,
     pub requests_per_minute: u32,
     pub max_sessions: usize,
+    pub max_model_requests: usize,
 }
 
 impl Default for Limits {
@@ -179,7 +202,97 @@ impl Default for Limits {
             auth_block_secs: 900,
             requests_per_minute: 300,
             max_sessions: 8,
+            max_model_requests: 16,
         }
+    }
+}
+
+/// What a model does, and so which endpoint calls it.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelType {
+    Chat,
+    Vision,
+    Embedding,
+    Reranker,
+    SpeechToText,
+    TextToSpeech,
+    ImageGenerator,
+}
+
+impl ModelType {
+    pub const ALL: [ModelType; 7] = [
+        ModelType::Chat,
+        ModelType::Vision,
+        ModelType::Embedding,
+        ModelType::Reranker,
+        ModelType::SpeechToText,
+        ModelType::TextToSpeech,
+        ModelType::ImageGenerator,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModelType::Chat => "chat",
+            ModelType::Vision => "vision",
+            ModelType::Embedding => "embedding",
+            ModelType::Reranker => "reranker",
+            ModelType::SpeechToText => "speech-to-text",
+            ModelType::TextToSpeech => "text-to-speech",
+            ModelType::ImageGenerator => "image-generator",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<ModelType> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == text)
+    }
+}
+
+/// The API format a model's upstream speaks.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelApi {
+    #[default]
+    Openai,
+    Anthropic,
+}
+
+/// A value that must never appear in a log or a `Debug` output.
+#[derive(Clone)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Model {
+    pub name: String,
+    pub kind: ModelType,
+    pub api: ModelApi,
+    /// Base URL of the upstream API with its version prefix, without a trailing `/`.
+    pub url: String,
+    pub upstream_model: String,
+    pub api_key: Option<Secret>,
+    pub defaults: serde_json::Map<String, serde_json::Value>,
+    /// Tokens that may call the model; `None` means every token.
+    pub tokens: Option<Vec<String>>,
+    pub description: Option<String>,
+}
+
+impl Model {
+    pub fn allows_token(&self, token: &str) -> bool {
+        self.tokens
+            .as_ref()
+            .is_none_or(|tokens| tokens.iter().any(|t| t == token))
     }
 }
 
@@ -389,6 +502,7 @@ impl Config {
             bail!("[sessions] max_turn_secs must be greater than 0");
         }
         let agents = resolve_agents(raw.agents)?;
+        let models = resolve_models(raw.models, &tokens)?;
         let workspaces = resolve_workspaces(raw.workspaces, &agents)?;
         Ok(Config {
             path: path.to_path_buf(),
@@ -398,12 +512,21 @@ impl Config {
             sessions,
             experimental: raw.experimental,
             agents,
+            models,
             workspaces,
         })
     }
 
     pub fn agent(&self, name: &str) -> Option<&Agent> {
         self.agents.iter().find(|a| a.name == name)
+    }
+
+    pub fn model(&self, name: &str) -> Option<&Model> {
+        self.models.iter().find(|m| m.name == name)
+    }
+
+    pub fn token(&self, name: &str) -> Option<&Token> {
+        self.tokens.iter().find(|t| t.name == name)
     }
 }
 
@@ -478,6 +601,7 @@ fn resolve_tokens(raw: Vec<RawToken>) -> Result<Vec<Token>> {
         tokens.push(Token {
             name: token.name,
             sha256,
+            models_only: token.models_only,
         });
     }
     Ok(tokens)
@@ -501,6 +625,7 @@ fn validate_limits(limits: &Limits) -> Result<()> {
         || limits.auth_block_secs == 0
         || limits.requests_per_minute == 0
         || limits.max_sessions == 0
+        || limits.max_model_requests == 0
     {
         bail!("every value in [limits] must be greater than 0");
     }
@@ -553,6 +678,115 @@ fn resolve_agents(raw: BTreeMap<String, RawAgent>) -> Result<Vec<Agent>> {
         }
     }
     Ok(agents)
+}
+
+fn resolve_models(raw: BTreeMap<String, RawModel>, tokens: &[Token]) -> Result<Vec<Model>> {
+    let mut models = Vec::new();
+    for (name, raw) in raw {
+        let table = format!("[models.{name}]");
+        let mut chars = name.chars();
+        let valid = matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
+            && name.len() <= 64
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+        if !valid {
+            // TOML reads an unquoted `.` as nested tables, so a dotted name cannot work.
+            bail!(
+                "{table}: model names may contain only lowercase letters, digits, `-` and `_`, start \
+                 with a letter or digit, and have at most 64 characters. For an upstream name like \
+                 `gpt-4.1`, name the table `gpt-4-1` and set `model = \"gpt-4.1\"`."
+            );
+        }
+        if raw.api == ModelApi::Anthropic
+            && !matches!(raw.r#type, ModelType::Chat | ModelType::Vision)
+        {
+            bail!(
+                "{table}: `api = \"anthropic\"` is only for chat and vision models; a {} model uses \
+                 the OpenAI API",
+                raw.r#type.as_str()
+            );
+        }
+        let url = check_model_url(&raw.url).with_context(|| {
+            format!(
+                "{table}: `url` must be an http or https base URL such as `http://10.0.0.5:8000/v1`, \
+                 without a query, fragment or user name and password"
+            )
+        })?;
+        if let Some(list) = &raw.tokens {
+            if list.is_empty() {
+                bail!(
+                    "{table}: `tokens` is empty, so no one could call the model; remove the key to allow every token"
+                );
+            }
+            for token in list {
+                if !tokens.iter().any(|t| &t.name == token) {
+                    bail!("{table}: `tokens` names `{token}`, which is not a [[tokens]] name");
+                }
+            }
+        }
+        let mut defaults = serde_json::Map::new();
+        for (key, value) in raw.defaults.unwrap_or_default() {
+            let value = toml_to_json(value).with_context(|| {
+                format!("{table}: `defaults.{key}` contains a TOML date or time or a NaN or infinite number, which JSON cannot carry; write it as a string")
+            })?;
+            if raw.r#type == ModelType::SpeechToText && (value.is_object() || value.is_array()) {
+                bail!(
+                    "{table}: `defaults.{key}` must be a string, number or boolean, because a \
+                     speech-to-text model gets its defaults as form fields"
+                );
+            }
+            defaults.insert(key, value);
+        }
+        models.push(Model {
+            upstream_model: raw.model.unwrap_or_else(|| name.clone()),
+            name,
+            kind: raw.r#type,
+            api: raw.api,
+            url,
+            api_key: raw.api_key.map(Secret),
+            defaults,
+            tokens: raw.tokens,
+            description: raw.description,
+        });
+    }
+    Ok(models)
+}
+
+/// The URL without a trailing `/`, if it is a plain http or https base URL.
+fn check_model_url(text: &str) -> Result<String> {
+    let uri: axum::http::Uri = text.parse()?;
+    let scheme_ok = matches!(uri.scheme_str(), Some("http" | "https"));
+    let authority = uri.authority().map(|a| a.as_str()).unwrap_or("");
+    if !scheme_ok
+        || uri.host().is_none_or(str::is_empty)
+        || uri.query().is_some()
+        || authority.contains('@')
+        || text.contains('#')
+    {
+        bail!("not a plain http or https URL");
+    }
+    Ok(text.trim_end_matches('/').to_string())
+}
+
+fn toml_to_json(value: toml::Value) -> Result<serde_json::Value> {
+    use serde_json::Value as Json;
+    Ok(match value {
+        toml::Value::String(text) => Json::String(text),
+        toml::Value::Integer(number) => Json::from(number),
+        toml::Value::Float(number) => serde_json::Number::from_f64(number)
+            .map(Json::Number)
+            .context("a NaN or infinite number")?,
+        toml::Value::Boolean(flag) => Json::Bool(flag),
+        toml::Value::Datetime(_) => bail!("a date or time"),
+        toml::Value::Array(items) => {
+            Json::Array(items.into_iter().map(toml_to_json).collect::<Result<_>>()?)
+        }
+        toml::Value::Table(table) => Json::Object(
+            table
+                .into_iter()
+                .map(|(key, value)| Ok((key, toml_to_json(value)?)))
+                .collect::<Result<_>>()?,
+        ),
+    })
 }
 
 fn resolve_workspaces(raw: Vec<RawWorkspace>, agents: &[Agent]) -> Result<Vec<Workspace>> {
@@ -806,6 +1040,103 @@ mod tests {
         let cfg = Config::parse(&text, Path::new("t.toml")).unwrap();
         assert_eq!(cfg.tokens[0].name, "grok");
         assert!(!cfg.workspaces[0].allows(Capability::Start));
+    }
+
+    const BRAIN: &str = "[[tokens]]\nname = \"brain\"\nsha256 = \"1111111111111111111111111111111111111111111111111111111111111111\"\nmodels_only = true\n";
+
+    #[test]
+    fn models_get_defaults_and_keep_their_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = parse(
+            "[models.qwen]\ntype = \"chat\"\nurl = \"http://10.0.0.5:8000/v1/\"\nmodel = \"Qwen/Qwen3-32B\"\n\
+             defaults = { chat_template_kwargs = { enable_thinking = false } }\n\
+             [models.embed]\ntype = \"embedding\"\nurl = \"http://h/v1\"\n",
+            dir.path(),
+        )
+        .unwrap();
+        let qwen = cfg.model("qwen").unwrap();
+        assert_eq!((qwen.kind, qwen.api), (ModelType::Chat, ModelApi::Openai));
+        assert_eq!(qwen.url, "http://10.0.0.5:8000/v1");
+        assert_eq!(qwen.upstream_model, "Qwen/Qwen3-32B");
+        assert_eq!(
+            qwen.defaults["chat_template_kwargs"]["enable_thinking"],
+            false
+        );
+        assert_eq!(cfg.model("embed").unwrap().upstream_model, "embed");
+        assert!(qwen.allows_token("grok"));
+        assert_eq!(cfg.limits.max_model_requests, 16);
+        assert!(!cfg.tokens[0].models_only);
+    }
+
+    #[test]
+    fn tokens_and_models_can_be_limited() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = parse(
+            &format!(
+                "{BRAIN}[models.opus]\ntype = \"chat\"\napi = \"anthropic\"\nurl = \"https://api.anthropic.com/v1\"\napi_key = \"sk-secret-123\"\ntokens = [\"brain\"]\n"
+            ),
+            dir.path(),
+        )
+        .unwrap();
+        assert!(cfg.token("brain").unwrap().models_only);
+        let opus = cfg.model("opus").unwrap();
+        assert!(opus.allows_token("brain") && !opus.allows_token("grok"));
+        assert_eq!(opus.api_key.as_ref().unwrap().expose(), "sk-secret-123");
+        assert!(!format!("{cfg:?}").contains("sk-secret-123"));
+    }
+
+    #[test]
+    fn invalid_models_are_rejected_with_the_table_name() {
+        const M: &str = "type = \"chat\"\nurl = \"http://h/v1\"\n";
+        let dir = tempfile::tempdir().unwrap();
+        let url = |url: &str| format!("[models.x]\ntype = \"chat\"\nurl = \"{url}\"\n");
+        let cases: Vec<(String, Vec<&str>)> = vec![
+            (format!("[models.\"gpt-4.1\"]\n{M}"), vec!["[models.gpt-4.1]"]),
+            (format!("[models.Qwen]\n{M}"), vec!["lowercase letters"]),
+            (
+                format!("[models.{}]\n{M}", "a".repeat(65)),
+                vec!["lowercase letters"],
+            ),
+            (
+                "[models.e]\ntype = \"embedding\"\napi = \"anthropic\"\nurl = \"http://h/v1\"\n"
+                    .into(),
+                vec!["[models.e]", "anthropic"],
+            ),
+            (url("ftp://h/v1"), vec!["[models.x]", "url"]),
+            (url("http://h/v1?a=1"), vec!["[models.x]", "url"]),
+            (url("http://h/v1#f"), vec!["[models.x]", "url"]),
+            (url("http://u:p@h/v1"), vec!["[models.x]", "url"]),
+            (url("not a url"), vec!["[models.x]", "url"]),
+            (
+                format!("[models.x]\n{M}tokens = [\"nobody\"]\n"),
+                vec!["nobody"],
+            ),
+            (format!("[models.x]\n{M}tokens = []\n"), vec!["tokens"]),
+            (
+                "[models.w]\ntype = \"speech-to-text\"\nurl = \"http://h/v1\"\ndefaults = { opts = { a = 1 } }\n"
+                    .into(),
+                vec!["[models.w]", "defaults"],
+            ),
+            (
+                format!("[models.x]\n{M}defaults = {{ when = 2026-01-01 }}\n"),
+                vec!["defaults"],
+            ),
+            ("[models.x]\ntype = \"chat\"\n".into(), vec!["url"]),
+            (
+                "[limits]\nmax_model_requests = 0\n".into(),
+                vec!["greater than 0"],
+            ),
+        ];
+        for (extra, fragments) in cases {
+            let err = parse(&extra, dir.path())
+                .err()
+                .unwrap_or_else(|| panic!("accepted:\n{extra}"));
+            let text = format!("{err:#}");
+            assert!(!text.contains("unknown field"), "{extra}\n=> {text}");
+            for fragment in fragments {
+                assert!(text.contains(fragment), "{extra}\n=> {text}");
+            }
+        }
     }
 
     #[test]
