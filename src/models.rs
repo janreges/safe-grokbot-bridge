@@ -25,6 +25,9 @@ use crate::server::AppState;
 
 /// Body limit of a model call with a JSON body: images travel inside chat requests as base64.
 pub const MAX_JSON_BODY: usize = 32 * 1024 * 1024;
+/// Body limit of a form (an audio file to transcribe): under Cloudflare's 100 MB ceiling whether
+/// it counts in decimal or binary megabytes.
+pub const MAX_FORM_BODY: usize = 96_000_000;
 /// Sent when the client names no version; Anthropic's API requires the header.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const BUSY_RETRY_SECS: u64 = 5;
@@ -378,6 +381,145 @@ pub async fn call_json(
         .body(body);
     let request = authorize(request, model, &parts.headers);
     forward(app, endpoint, model, request, slot).await
+}
+
+/// One model call with a multipart form body. The form is read completely and rebuilt: `model`
+/// is replaced, defaults the client did not send are added, file parts keep their file name and
+/// content type.
+pub async fn call_form(
+    app: &AppState,
+    endpoint: &'static Endpoint,
+    caller: &Caller,
+    request: Request,
+) -> Response {
+    let too_large = || {
+        ApiError::too_large(
+            "The form is larger than 96 MB, the limit of a transcription. Split the audio into shorter files or compress it.",
+        )
+    };
+    let declared = request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    if declared.is_some_and(|length| length > MAX_FORM_BODY as u64) {
+        return too_large().into_response();
+    }
+    let headers = request.headers().clone();
+    let Some(slot) = app.models.slot().await else {
+        drain(request.into_body(), MAX_FORM_BODY).await;
+        return busy(&app.config).into_response();
+    };
+    let fields = match read_form(request).await {
+        Ok(fields) => fields,
+        Err(err) if err.status == StatusCode::PAYLOAD_TOO_LARGE => {
+            return too_large().into_response();
+        }
+        Err(err) => return err.into_response(),
+    };
+    let (model, form) = match prepare_form(&app.config, endpoint, &caller.token, fields) {
+        Ok(prepared) => prepared,
+        Err(err) => return err.into_response(),
+    };
+    let request = app
+        .models
+        .client
+        .post(format!("{}{}", model.url, endpoint.upstream_path))
+        .multipart(form);
+    let request = authorize(request, model, &headers);
+    forward(app, endpoint, model, request, slot).await
+}
+
+struct FormField {
+    name: String,
+    file_name: Option<String>,
+    content_type: Option<String>,
+    bytes: Bytes,
+}
+
+async fn read_form(request: Request) -> Result<Vec<FormField>, ApiError> {
+    use axum::extract::FromRequest;
+    let mut form = axum::extract::Multipart::from_request(request, &())
+        .await
+        .map_err(|rejection| {
+            ApiError::bad_request(format!(
+                "This endpoint expects a multipart form (`multipart/form-data`) with the fields `model` and `file`, as OpenAI's transcription API takes it: {}",
+                rejection.body_text()
+            ))
+        })?;
+    let unreadable = |err: axum::extract::multipart::MultipartError| {
+        ApiError::new(
+            err.status(),
+            "invalid_request",
+            format!("The multipart form could not be read: {}", err.body_text()),
+        )
+    };
+    let mut fields = Vec::new();
+    while let Some(field) = form.next_field().await.map_err(unreadable)? {
+        let name = field.name().unwrap_or_default().to_string();
+        let file_name = field.file_name().map(str::to_string);
+        let content_type = field.content_type().map(str::to_string);
+        let bytes = field.bytes().await.map_err(unreadable)?;
+        fields.push(FormField {
+            name,
+            file_name,
+            content_type,
+            bytes,
+        });
+    }
+    Ok(fields)
+}
+
+/// Picks the model a form names and rebuilds the form for its upstream, in the client's order.
+fn prepare_form<'a>(
+    config: &'a Config,
+    endpoint: &Endpoint,
+    token: &str,
+    fields: Vec<FormField>,
+) -> Result<(&'a Model, reqwest::multipart::Form), ApiError> {
+    let is_model = |field: &FormField| field.name == "model" && field.file_name.is_none();
+    let Some(name) = fields
+        .iter()
+        .find(|field| is_model(field))
+        .map(|field| String::from_utf8_lossy(&field.bytes).trim().to_string())
+    else {
+        return Err(ApiError::bad_request(
+            "The form needs a text field `model` with the name of a speech-to-text model from GET /v1/models.",
+        ));
+    };
+    let model = select(config, endpoint, &name, token)?;
+    let sent: Vec<String> = fields.iter().map(|field| field.name.clone()).collect();
+    let mut form = reqwest::multipart::Form::new();
+    for field in fields {
+        if is_model(&field) {
+            form = form.text("model", model.upstream_model.clone());
+            continue;
+        }
+        let length = field.bytes.len() as u64;
+        let mut part = reqwest::multipart::Part::stream_with_length(field.bytes, length);
+        if let Some(file_name) = field.file_name {
+            part = part.file_name(file_name);
+        }
+        if let Some(content_type) = &field.content_type {
+            part = part.mime_str(content_type).map_err(|_| {
+                ApiError::bad_request(format!(
+                    "The form part `{}` has an invalid content type `{content_type}`.",
+                    field.name
+                ))
+            })?;
+        }
+        form = form.part(field.name, part);
+    }
+    for (key, value) in &model.defaults {
+        if !sent.contains(key) {
+            let text = match value {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            form = form.text(key.clone(), text);
+        }
+    }
+    Ok((model, form))
 }
 
 /// Picks the model a JSON body names and rewrites the body for its upstream.

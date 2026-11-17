@@ -813,3 +813,172 @@ async fn hanging_up_ends_the_upstream_call() {
     let (text, failed) = read_all(chat(&h).await).await;
     assert_eq!((text.as_str(), failed), ("data: done\n\n", false));
 }
+
+/// A form part: name, optional file name and content type, content.
+type Part<'a> = (&'a str, Option<(&'a str, &'a str)>, &'a [u8]);
+
+/// A multipart body with boundary `XBOUND`.
+fn form(parts: &[Part]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (name, file, bytes) in parts {
+        body.extend_from_slice(b"--XBOUND\r\n");
+        match file {
+            Some((file_name, content_type)) => body.extend_from_slice(
+                format!(
+                    "Content-Disposition: form-data; name=\"{name}\"; filename=\"{file_name}\"\r\nContent-Type: {content_type}\r\n\r\n"
+                )
+                .as_bytes(),
+            ),
+            None => body.extend_from_slice(
+                format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+            ),
+        }
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(b"--XBOUND--\r\n");
+    body
+}
+
+#[tokio::test]
+async fn a_transcription_form_is_rebuilt_for_the_upstream() {
+    let up = upstream(
+        Router::new()
+            .route(
+                "/v1/audio/transcriptions",
+                post(|mut form: axum::extract::Multipart| async move {
+                    let mut echo = serde_json::Map::new();
+                    while let Some(field) = form.next_field().await.unwrap() {
+                        let name = field.name().unwrap().to_string();
+                        if name == "file" {
+                            echo.insert("file_name".into(), json!(field.file_name().unwrap()));
+                            echo.insert("file_type".into(), json!(field.content_type().unwrap()));
+                            let bytes = field.bytes().await.unwrap();
+                            echo.insert("file_len".into(), json!(bytes.len()));
+                            let sum: u64 = bytes.iter().map(|b| u64::from(*b)).sum();
+                            echo.insert("file_sum".into(), json!(sum));
+                        } else {
+                            echo.insert(name, json!(field.text().await.unwrap()));
+                        }
+                    }
+                    Json(Value::Object(echo))
+                }),
+            )
+            .layer(axum::extract::DefaultBodyLimit::disable()),
+    )
+    .await;
+    let h = harness(
+        "[\"files\"]",
+        &format!(
+            "{}{}",
+            model_toml(
+                "whisper",
+                "speech-to-text",
+                &up.url,
+                "model = \"openai/whisper-large-v3\"\napi_key = \"sk-up\"\n\
+                 defaults = { language = \"cs\", temperature = 0 }",
+            ),
+            model_toml("qwen", "chat", &up.url, ""),
+        ),
+    )
+    .await;
+    let send = |body: Vec<u8>, content_type: &str| {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("authorization", format!("Bearer {}", h.token))
+            .header("content-type", content_type)
+            .body(Body::from(body))
+            .unwrap();
+        h.send(request)
+    };
+    let audio: Vec<u8> = (0..25_600u32).map(|i| (i % 256) as u8).collect();
+    let expected_sum: u64 = audio.iter().map(|b| u64::from(*b)).sum();
+    let multipart = "multipart/form-data; boundary=XBOUND";
+
+    // The order `curl -F file=@a.wav -F model=whisper` sends: the file before the model.
+    let body = form(&[
+        ("file", Some(("a.wav", "audio/wav")), &audio),
+        ("model", None, b"whisper"),
+        ("language", None, b"en"),
+    ]);
+    let response = send(body, multipart).await;
+    let status = response.status();
+    let echo = json_body(response).await;
+    assert_eq!(status, StatusCode::OK, "{echo}");
+    assert_eq!(
+        echo,
+        json!({"model": "openai/whisper-large-v3", "language": "en", "temperature": "0",
+            "file_name": "a.wav", "file_type": "audio/wav", "file_len": 25600, "file_sum": expected_sum})
+    );
+    let seen = up.last();
+    assert_eq!(seen.headers["authorization"], "Bearer sk-up");
+    let content_type = seen.headers["content-type"].to_str().unwrap();
+    assert!(
+        content_type.starts_with("multipart/form-data; boundary="),
+        "{content_type}"
+    );
+    assert!(!content_type.contains("XBOUND"));
+    // Above the 1 MiB limit of the other endpoints.
+    let big = vec![7u8; 2 * 1024 * 1024];
+    let body = form(&[
+        ("model", None, b"whisper"),
+        ("file", Some(("b.wav", "audio/wav")), &big),
+    ]);
+    let response = send(body, multipart).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["file_len"], 2 * 1024 * 1024);
+
+    let refusals = [
+        (
+            form(&[("file", Some(("a.wav", "audio/wav")), &audio)]),
+            multipart,
+            "invalid_request",
+            "`model`",
+        ),
+        (
+            form(&[
+                ("model", None, b"qwen"),
+                ("file", Some(("a.wav", "audio/wav")), &audio),
+            ]),
+            multipart,
+            "wrong_model_type",
+            "POST /v1/chat/completions",
+        ),
+        (
+            json!({"model": "whisper"}).to_string().into_bytes(),
+            "application/json",
+            "invalid_request",
+            "multipart",
+        ),
+    ];
+    for (body, content_type, code, fragment) in refusals {
+        let response = send(body, content_type).await;
+        let status = response.status();
+        let body = json_body(response).await;
+        assert_eq!(
+            (status, body["error"]["code"].as_str()),
+            (StatusCode::BAD_REQUEST, Some(code)),
+            "{body}"
+        );
+        assert!(message(&body).contains(fragment), "{body}");
+    }
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/audio/transcriptions")
+        .header("authorization", format!("Bearer {}", h.token))
+        .header("content-type", multipart)
+        .header("content-length", "96000001")
+        .body(Body::empty())
+        .unwrap();
+    let response = h.send(request).await;
+    let status = response.status();
+    let body = json_body(response).await;
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (StatusCode::PAYLOAD_TOO_LARGE, Some("too_large"))
+    );
+    assert!(message(&body).contains("96 MB"), "{body}");
+    assert_eq!(up.count(), 2);
+}

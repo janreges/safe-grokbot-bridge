@@ -96,6 +96,11 @@ fn open_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(rerank))
         .routes(routes!(speech))
         .routes(routes!(image_generations))
+        .merge(
+            OpenApiRouter::new()
+                .routes(routes!(transcriptions))
+                .layer(DefaultBodyLimit::max(models::MAX_FORM_BODY)),
+        )
 }
 
 /// Endpoints closed to `models_only` tokens.
@@ -1015,4 +1020,34 @@ async fn image_generations(
     request: axum::extract::Request,
 ) -> axum::response::Response {
     models::call_json(&app, &models::IMAGES, &caller, request).await
+}
+
+/// A transcription form as OpenAI's API takes it. Further fields such as `language`, `prompt`,
+/// `response_format`, `temperature` or `stream` are passed on as they are.
+#[derive(ToSchema)]
+pub struct TranscriptionForm {
+    /// A `speech-to-text` model from GET /v1/models.
+    pub model: String,
+    /// The audio file, with its file name and content type.
+    #[schema(value_type = String, format = Binary)]
+    pub file: Vec<u8>,
+}
+
+/// Transcribes audio with a `speech-to-text` model such as Whisper, in the OpenAI format: a
+/// multipart form with `model` and `file`. The bridge replaces `model` with the upstream's name
+/// and adds the model's `defaults` (for example `language`) as form fields where your form does
+/// not set them. The file may be up to 96 MB. A long recording needs `stream: true` where the
+/// upstream supports it, because an answer that has not started within 90 seconds is cut.
+#[utoipa::path(post, path = "/v1/audio/transcriptions", tag = "models",
+    request_body(content = inline(TranscriptionForm), content_type = "multipart/form-data"),
+    responses(
+        (status = 200, description = "The upstream's answer: JSON or text, depending on `response_format`", body = serde_json::Value),
+        (status = 413, description = "`too_large`: the form is larger than 96 MB", body = ErrorBody),
+    ))]
+async fn transcriptions(
+    State(app): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    models::call_form(&app, &models::TRANSCRIPTIONS, &caller, request).await
 }
