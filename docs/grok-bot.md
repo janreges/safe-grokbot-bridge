@@ -68,6 +68,46 @@ Keep in mind:
 - Never paste a token into a chat message. Chats are stored, and the token would end up in the
   conversation.
 
+## Using models from a program
+
+When the bot writes a program that calls models, for example a "second brain" built on an LLM,
+embeddings and semantic search, the program talks to the bridge with a stock client library:
+
+| Library | Base URL | API key |
+|---|---|---|
+| OpenAI (`openai` for Python or JavaScript) | `<URL>/v1`, e.g. `https://pc1-bridge.example.com/v1` | the bridge token |
+| Anthropic (`anthropic`) | `<URL>`, without `/v1` | the bridge token (sent in `x-api-key`) |
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    base_url=os.environ["SGB_PC1_URL"] + "/v1",
+    api_key=os.environ["SGB_PC1_TOKEN"],
+    # Only with the Cloudflare Access second factor:
+    default_headers={
+        "CF-Access-Client-Id": os.environ["SGB_PC1_ACCESS_ID"],
+        "CF-Access-Client-Secret": os.environ["SGB_PC1_ACCESS_SECRET"],
+    },
+)
+vectors = client.embeddings.create(model="embed", input=["hello", "world"])
+```
+
+- `GET /v1/models` lists the models and which endpoint calls each one. Switching between a local
+  and a paid model is a change of the `model` name only.
+- Both libraries take `default_headers` for the two Cloudflare Access headers.
+- With a self-signed certificate (direct TLS), the library must trust the bridge's certificate.
+  The certificate is public: the machine's owner copies the file that `safe-grokbot-bridge
+  check` prints next to `TLS`, and the program passes it as its CA bundle
+  (`http_client=httpx.Client(verify="pc1.pem")` for the OpenAI and Anthropic libraries). The
+  host name the program uses must be one of the certificate's names (`[server.tls] hostnames`).
+- Long generations need `stream: true`: an answer that has not started within 90 seconds is cut.
+- A program that runs on its own should get its own **`models_only`** token from the machine's
+  owner. Such a token can call models and nothing else, so a leaked program key cannot reach your
+  folders, git or agents. Test a new key with one call first: ten failed authentications block
+  the bot's address for 15 minutes.
+
 ## Tips
 
 - Name your tmux-started sessions' folders well: session ids are built from the folder name and

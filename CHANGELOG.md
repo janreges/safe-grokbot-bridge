@@ -6,6 +6,34 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- Models behind the bridge. `[models.<name>]` tables in the config name chat, vision,
+  embedding, reranker, speech-to-text, text-to-speech and image models on a vLLM server or
+  another OpenAI-compatible API, or at Anthropic, with the upstream's URL, model name and API
+  key. Clients call them with stock OpenAI and Anthropic client libraries at
+  `/v1/chat/completions`, `/v1/messages`, `/v1/embeddings`, `/v1/rerank`,
+  `/v1/audio/transcriptions`, `/v1/audio/speech` and `/v1/images/generations`, using the bridge
+  token as their API key; the upstream keys never leave the machine. Requests and answers pass
+  through unchanged apart from the model name and the model's `defaults`, which fill in
+  parameters such as `chat_template_kwargs` or `dimensions` that a request leaves out. Event
+  streams get keep-alive comments during long pauses, so a reasoning model's stream survives
+  Cloudflare's timeout.
+- `GET /v1/models` lists the models a token may call, with their type, endpoint and defaults.
+  `GET /v1/info` shows them too.
+- `tokens` on a model limits it to named tokens, and `models_only = true` on a token limits the
+  token to the model endpoints, for programs that need nothing else. `[limits]
+  max_model_requests` (default 16) caps the model calls running at once.
+- The token is also accepted in the `x-api-key` header, where Anthropic's client library sends
+  its API key.
+- `check` asks every model's upstream whether it is reachable, accepts the key and knows the
+  model. It warns when the config file lies inside a workspace, or holds API keys and is
+  readable by other users. `init` writes commented model examples.
+
+### Changed
+
+- The file endpoints never list or serve the config file the bridge was started with.
+
 ## [0.3.0] - 2026-10-30
 
 ### Added

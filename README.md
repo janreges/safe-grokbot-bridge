@@ -8,7 +8,9 @@
 **Let a remote AI agent work on your machines, safely.** `safe-grokbot-bridge` is a small daemon
 that gives an agent such as a [Grok Bot](https://x.ai) a narrow, authenticated HTTP API to your
 computers. Through it the agent can read your project folders and git history, see the Claude
-Code, Codex and Hermes sessions running there, talk to them, and start new ones.
+Code, Codex and Hermes sessions running there, talk to them, and start new ones. It can also call
+the models you configure: LLMs, embeddings, rerankers and speech models on your own vLLM server,
+and paid APIs through your keys, with stock OpenAI and Anthropic client libraries.
 
 You keep using your agents as before. The remote agent becomes a coordinator that can hand work to
 them and follow up while you are away from the keyboard, for example from your phone.
@@ -42,6 +44,7 @@ flowchart LR
         headless["headless runs:<br/>claude -p, codex exec"]
         external["sessions outside tmux<br/>(experimental)"]
         files[("allowed folders:<br/>files and git, read-only")]
+        models["configured models:<br/>vLLM, paid APIs"]
     end
     bot -- "HTTPS + bearer token" --> edge
     edge -- "tunnel, opened from the machine" --> cfd
@@ -50,6 +53,7 @@ flowchart LR
     bridge --> headless
     bridge --> external
     bridge --> files
+    bridge --> models
 ```
 
 1. The bridge listens on `127.0.0.1` only. `cloudflared` opens an outbound tunnel, so no port is
@@ -72,6 +76,12 @@ flowchart LR
   - **Reliable state:** state comes from Claude Code's own status, per-session turn-complete hooks
     and terminal activity, so the client knows when an agent is working, waiting for an answer or
     done. It long-polls instead of guessing.
+- **Models behind the bridge.** Chat, vision, embedding, reranker, speech-to-text,
+  text-to-speech and image models, local or paid, under names you choose. Programs use the stock
+  OpenAI or Anthropic client library with the bridge as base URL and the bridge token as API key;
+  the upstream keys stay on the machine. Per-model defaults (`chat_template_kwargs`,
+  `dimensions`), a model list, streams kept alive through long pauses, and tokens limited to
+  models for programs.
 - **Read-only project access.** Directory listings (respecting `.gitignore`), text files by line
   range, `git status`, `log`, `diff` and `show`. The file endpoints never serve secrets such as
   `.env` files and private keys. Git output is not filtered, so anything committed to a
@@ -155,7 +165,8 @@ command again in Codex; `hermes skills update` in Hermes; `npx skills update` el
 
 ## Using the API
 
-Every request except `GET /healthz` needs `Authorization: Bearer <token>`. All paths are absolute.
+Every request except `GET /healthz` needs `Authorization: Bearer <token>` (or the token in
+`x-api-key`, as Anthropic's client library sends it). All paths are absolute.
 
 ```bash
 B=https://bridge.example.com; H="Authorization: Bearer $SGB_TOKEN"
@@ -179,6 +190,21 @@ curl -sH "$H" -H 'content-type: application/json' $B/v1/sessions/sgb-app-claude-
 curl -sH "$H" "$B/v1/files?path=/home/me/projects/app&depth=2"
 curl -sH "$H" "$B/v1/files/content?path=/home/me/projects/app/README.md"
 curl -sH "$H" "$B/v1/git/log?dir=/home/me/projects/app&limit=10"
+
+# Models: what is configured, then an embedding
+curl -sH "$H" $B/v1/models
+curl -sH "$H" -H 'content-type: application/json' $B/v1/embeddings \
+     -d '{"model": "embed", "input": ["hello"]}'
+```
+
+A program calls the models with a stock client library:
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(base_url="https://pc1-bridge.example.com/v1", api_key=os.environ["SGB_PC1_TOKEN"])
+client.embeddings.create(model="embed", input=["hello"])
 ```
 
 | Endpoint | Purpose |
@@ -191,6 +217,11 @@ curl -sH "$H" "$B/v1/git/log?dir=/home/me/projects/app&limit=10"
 | `GET /v1/sessions/{id}?wait=&lines=` | State, last answer, terminal screen; long-poll while working |
 | `POST /v1/sessions/{id}/input` | `text` and/or `keys` |
 | `DELETE /v1/sessions/{id}` | Stop a session the bridge started |
+| `GET /v1/models` | The models this token may call, with type, endpoint and defaults |
+| `POST /v1/chat/completions`, `/v1/messages` | Chat and vision models (OpenAI or Anthropic format) |
+| `POST /v1/embeddings`, `/v1/rerank` | Embedding and reranker models |
+| `POST /v1/audio/transcriptions`, `/v1/audio/speech` | Speech-to-text (multipart form) and text-to-speech |
+| `POST /v1/images/generations` | Image generation |
 | `GET /openapi.json` | The OpenAPI document ([also in the repo](docs/openapi.json)) |
 
 ### How sessions work
@@ -226,6 +257,9 @@ prompts if you allow that. Treat it like an SSH key. In short:
   with an Access service token as a second factor, or enable TLS with key pinning.
 - **Folders:** capabilities per folder; access is read-only by default. Paths are canonicalized,
   so `..` and symlinks cannot escape.
+- **Models:** upstream keys stay in the config and never reach a client; the bridge never serves
+  its own config file. A client names a model, never a URL. Give programs `models_only` tokens,
+  which cannot reach folders, git or agents, and limit paid models to named tokens.
 - **No shell endpoint:** the bridge itself never runs arbitrary commands, and git runs with
   options that keep a repository's own config from executing programs. The coding agents it
   starts do run commands, under their own permission systems.

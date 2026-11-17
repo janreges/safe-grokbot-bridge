@@ -1,6 +1,6 @@
 ---
 name: safe-grokbot-bridge
-description: Install, configure, update and troubleshoot safe-grokbot-bridge on this machine. The bridge is a small daemon that lets a remote AI agent such as Grok Bot read chosen folders and their git history and work with the Claude Code, Codex or Hermes sessions here, through an authenticated HTTPS API behind a Cloudflare Tunnel or TLS with key pinning. Use it when the user wants to set up the bridge, decide or change which folders it exposes and what the bot may do there, run it as a service, connect a Cloudflare Tunnel, start agent sessions the bot can reach, rotate a token, upgrade, or find out why the bot cannot connect.
+description: Install, configure, update and troubleshoot safe-grokbot-bridge on this machine. The bridge is a small daemon that lets a remote AI agent such as Grok Bot read chosen folders and their git history and work with the Claude Code, Codex or Hermes sessions here, and call the models the user configures (local vLLM servers, paid APIs), through an authenticated HTTPS API behind a Cloudflare Tunnel or TLS with key pinning. Use it when the user wants to set up the bridge, decide or change which folders it exposes and what the bot may do there, offer models to the bot, run it as a service, connect a Cloudflare Tunnel, start agent sessions the bot can reach, rotate a token, upgrade, or find out why the bot cannot connect.
 ---
 
 # safe-grokbot-bridge
@@ -8,7 +8,9 @@ description: Install, configure, update and troubleshoot safe-grokbot-bridge on 
 You help the user run safe-grokbot-bridge on this machine. A bot in the cloud, usually Grok Bot,
 reaches the bridge over HTTPS with a bearer token. Through it the bot reads the folders the user
 allows and their git history, sees the coding-agent sessions running here, sends them messages
-and starts new ones. What the bot may do is set per folder in one TOML file. That access reaches
+and starts new ones. It can also call the models the user lists in the config, such as an LLM on
+a vLLM server at home or a paid API with the user's key. What the bot may do is set per folder in
+one TOML file. That access reaches
 the user's code and accounts, so set it up carefully and never wider than the user asked for.
 
 Project: https://github.com/janreges/safe-grokbot-bridge. Its `docs/` folder has the full
@@ -41,11 +43,12 @@ guides; read them there, or in an unpacked release archive, when a step needs mo
   - Whatever the bot reads leaves this machine for the bot provider's servers. Customer data
     and secrets belong outside the exposed folders unless that is allowed.
 - Secrets never pass through this conversation. Never print, `cat`, echo or paste the bridge
-  token, the tunnel token or a Cloudflare API token, never run a command whose output shows
-  one, and never ask the user to paste one into the chat. Commands that show or read a secret
+  token, the tunnel token, a Cloudflare API token or a model provider's API key, never run a
+  command whose output shows one, and never ask the user to paste one into the chat. Commands that show or read a secret
   are for the user's own terminal window, not for a `!` command in this chat, whose output
   would land in the conversation. If a secret shows up in the chat anyway, tell the user to
-  replace it: a bridge token as in section 4, a tunnel or API token in Cloudflare.
+  replace it: a bridge token as in section 4, a tunnel or API token in Cloudflare, a model key
+  at its provider.
 - Commands that need `sudo` or another password are for the user to run in their own terminal:
   give them the exact command. Ask before you install system packages or change anything
   outside the user's config and data folders (`~/.config`, `~/.local`, `~/Library`,
@@ -219,6 +222,54 @@ Only when it applies:
   `accept` on purpose, in their user settings (all sessions) or with `--settings` for one
   session they start (a project or local settings file cannot grant it; docs/design.md §8.4
   says what it affects), and let them decide.
+- **Models the bot should call** (section 3a).
+
+### 3a. Models
+
+When the user wants the bot to use models through this machine, agree on one `[models.<name>]`
+table per model:
+
+- **Which models, and where they run.** Look for local servers yourself: `curl -s
+  http://<host>:<port>/v1/models` on a vLLM or other OpenAI-compatible server lists its models.
+  The table name is what the bot sends as `model`: lowercase letters, digits, `-` and `_`, no
+  `.` (`gpt-4.1` becomes `[models.gpt-4-1]` with `model = "gpt-4.1"`).
+- **The type** of each: `chat`, `vision`, `embedding`, `reranker`, `speech-to-text`,
+  `text-to-speech` or `image-generator`. Anthropic's API is `api = "anthropic"`, for chat and
+  vision models only.
+- **Defaults** the user wants, such as `chat_template_kwargs = { enable_thinking = false }` for a
+  reasoning model, or `dimensions = 1024` for an embedding model that supports it.
+- **Paid models:** which tokens may call them (`tokens = ["grok"]`), so a program cannot spend
+  money it should not.
+- **A program that only needs models** gets its own token with `models_only = true` (section 4).
+  It cannot reach folders, git or agents.
+
+**API keys never go through this chat.** Write the table with `api_key = "<paste the key
+here>"` and let the user put the key in with their own editor. Then:
+
+- the config file must stay outside every exposed folder, and so must any copy of it;
+- `chmod 600` on it (Linux, macOS);
+- `check` probes every model and says whether its server answers, accepts the key and knows the
+  model, without printing the key.
+
+Tell the user what a key on this machine means: a token that may start or drive agents can read
+the config through an agent, so that token is now worth money at the paid providers too.
+
+```toml
+[models.qwen]
+type = "chat"
+url = "http://10.0.0.5:8000/v1"       # the server's base URL, with /v1
+model = "Qwen/Qwen3-32B"              # its own name for the model
+description = "Local Qwen3 32B"
+defaults = { chat_template_kwargs = { enable_thinking = false } }
+
+[models.opus]
+type = "chat"
+api = "anthropic"
+url = "https://api.anthropic.com/v1"
+model = "claude-opus-5-5"
+api_key = "<paste the key here>"
+tokens = ["grok"]
+```
 
 Show the plan and wait for a yes, for example:
 
@@ -279,7 +330,7 @@ names every problem it finds. `docs/configuration.md` explains every key.
 1. Read the config file (`check` prints its path) and show its folders as the table from
    section 3. Do not show token hashes.
 2. Ask what should change: a folder to add or remove, another level, the agents, permission
-   prompts, deny patterns, or tokens.
+   prompts, deny patterns, models (section 3a), or tokens.
 3. Show the change as before and after, point out anything that widens access, and wait for a
    yes.
 4. Back up the file (`cp config.toml config.toml.bak`), edit it, run `safe-grokbot-bridge check`,
@@ -294,6 +345,8 @@ Tokens:
   (umask 077; safe-grokbot-bridge token --name laptop > ~/.config/safe-grokbot-bridge/laptop-token.txt)
   sed -n '/^\[\[tokens\]\]/,$p' ~/.config/safe-grokbot-bridge/laptop-token.txt >> "<config file>"
   ```
+- **A token for a program that only calls models:** as above, then add `models_only = true`
+  to its `[[tokens]]` entry.
 - **Revoke a token:** remove its `[[tokens]]` entry and restart.
 - **Replace a leaked token:** create a new one, let the user give it to the client, then revoke
   the old one.
@@ -421,6 +474,12 @@ the new binary if the bridge listens on port 443.
 | A session is listed, but the bot cannot type into it | It runs in a shell inside tmux, or its folder lacks `input`: start it with `safe-grokbot-bridge launch` |
 | The bridge is gone after a reboot | On WSL 2 and macOS it needs more than a service: see "When the bridge runs" in references/services.md |
 | `403 forbidden` for git | The repository's root, or the place its history is stored, lies outside a folder with `git` |
+| `502 upstream_unreachable` for a model | Its server is off or `url` is wrong; `check` shows the reason |
+| `502 upstream_auth_failed` | The model's `api_key` is wrong or expired: the user replaces it in the config |
+| `502 upstream_misconfigured` | `url` or `model` is wrong, e.g. a missing `/v1`; the message quotes the server's answer |
+| `504 upstream_timeout` | The model took more than 90 seconds to start answering: the bot should use `stream: true`, or the server is overloaded |
+| `429 models_busy` | `max_model_requests` calls run already; raise it in `[limits]` if the machine can take more |
+| `check` warns that the config file lies in a workspace | Move it, and any copies, out of the exposed folders, then start the bridge with `--config <new path>` |
 
 ## 10. Remove the bridge
 

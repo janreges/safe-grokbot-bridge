@@ -1,13 +1,14 @@
 ---
 name: safe-grokbot-bridge-client
-description: Work with my computers through safe-grokbot-bridge, and connect new ones. Read project folders and git history there, see which Claude Code, Codex and Hermes sessions are running, give them tasks and follow-ups, answer their prompts, and start new sessions. Also connect a new machine by creating its Cloudflare Tunnel and writing the message for the machine's coding agent. Use it whenever a task involves code, repositories or coding agents on my machines, or when I want to connect a machine.
+description: Work with my computers through safe-grokbot-bridge, and connect new ones. Read project folders and git history there, see which Claude Code, Codex and Hermes sessions are running, give them tasks and follow-ups, answer their prompts, and start new sessions. Call the models configured there (local LLMs, vision, embeddings, rerankers, speech and image models, paid APIs) with curl or from programs you write, through the OpenAI and Anthropic client libraries. Also connect a new machine by creating its Cloudflare Tunnel and writing the message for the machine's coding agent. Use it whenever a task involves code, repositories, coding agents or models on my machines, or when I want to connect a machine.
 ---
 
 # safe-grokbot-bridge client
 
 Each of my machines runs a bridge with an HTTP API. You cannot run commands on my machines
 yourself. You can read the folders I allowed, and you can work through coding agents (Claude
-Code, Codex, Hermes) that run there. You need `bash` and `curl`.
+Code, Codex, Hermes) that run there. You can also call the models I configured on a machine
+(section Models). You need `bash` and `curl`.
 
 ## Machines
 
@@ -74,6 +75,68 @@ sgb pc1 POST /v1/sessions /tmp/start.json
 9. Report to me what the agent did and how you verified it, for example with
    `/v1/git/diff?dir=…` or test output from `last_message`. Do not just relay that it is done.
 
+## Models
+
+`GET /v1/models` lists the models this token may call: `id` is the name you send as `model`,
+plus `type`, `endpoint` (the path that calls it), `upstream_model`, `description` and
+`defaults` (parameters the bridge fills in when you leave them out). Call a model like the
+OpenAI or Anthropic API, with the machine's URL in front:
+
+```bash
+cat > /tmp/embed.json <<'EOF'
+{"model": "embed", "input": ["first text", "second text"]}
+EOF
+sgb pc1 POST /v1/embeddings /tmp/embed.json
+sgb pc1 POST /v1/audio/speech /tmp/tts.json > /tmp/answer.mp3      # binary answers: redirect them
+```
+
+| `type` | Endpoint |
+|---|---|
+| `chat`, `vision` | `POST /v1/chat/completions`, or `POST /v1/messages` when `api` is `anthropic` |
+| `embedding` | `POST /v1/embeddings` |
+| `reranker` | `POST /v1/rerank` |
+| `speech-to-text` | `POST /v1/audio/transcriptions` (a multipart form, see below) |
+| `text-to-speech` | `POST /v1/audio/speech` |
+| `image-generator` | `POST /v1/images/generations` |
+
+`sgb` sends JSON. For a transcription, define this helper too and pass curl's form fields:
+
+```bash
+sgbf() { # sgbf <machine> <path> -F … (a multipart form)
+  local m; m=$(printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_')
+  local url="SGB_${m}_URL" tok="SGB_${m}_TOKEN" pin="SGB_${m}_PIN" p="$2"; shift 2
+  local aid="SGB_${m}_ACCESS_ID" asec="SGB_${m}_ACCESS_SECRET" tls=()
+  [ -n "${!pin}" ] && tls=(-k --pinnedpubkey "${!pin}")
+  curl -sS --max-time 120 "${tls[@]}" \
+       -H @<(printf 'Authorization: Bearer %s\n' "${!tok}"
+             [ -n "${!aid}" ] && printf 'CF-Access-Client-Id: %s\nCF-Access-Client-Secret: %s\n' "${!aid}" "${!asec}") \
+       "${!url}$p" "$@"
+}
+sgbf pc1 /v1/audio/transcriptions -F model=whisper -F file=@/tmp/talk.mp3
+```
+
+**In a program** use the stock client library, and read the URL and token from the environment;
+never write them into code or files:
+
+```python
+import os
+from openai import OpenAI
+client = OpenAI(base_url=os.environ["SGB_PC1_URL"] + "/v1", api_key=os.environ["SGB_PC1_TOKEN"])
+```
+
+- Anthropic's library takes the URL without `/v1`. Both take `default_headers` for the
+  `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers when the machine has them.
+- A machine with `SGB_<NAME>_PIN` has a self-signed certificate. A library cannot pin; ask me for
+  the machine's certificate file and pass it with `http_client=httpx.Client(verify=…)`.
+- An answer must start within 90 seconds, or the bridge ends the call with `504
+  upstream_timeout`. Use `stream: true` for long generations. A stream may carry `: keep-alive`
+  lines during long pauses; client libraries skip them.
+- Send embeddings in batches (`input` as a list): each call counts against the token's requests
+  per minute, and the machine runs a limited number of model calls at once.
+- For a program that runs on its own, ask me for a separate token with `models_only = true`: it
+  can call models and nothing else. Test a new token with one call: ten failed logins block your
+  address for 15 minutes.
+
 ## Rules
 
 - **Send each message once.** If a request was slow or a wait ended while the agent still works,
@@ -118,11 +181,20 @@ sgb pc1 POST /v1/sessions /tmp/start.json
   - `429`: wait `Retry-After` seconds.
   - `503`, `agent_exited`, `tmux_failed`, `delivery_failed`: tell me; retrying the same call will
     not help.
+  - Models: `404 model_not_found` and `400 wrong_model_type` name the models and the endpoint
+    to use; `403 forbidden` means this token may not call that model; `429 models_busy`: wait
+    `Retry-After` seconds; `502 upstream_unreachable`, `upstream_auth_failed`,
+    `upstream_misconfigured`: the model's server or its config on my machine is wrong, tell me and
+    do not retry; `504 upstream_timeout`: use `stream: true`. Other errors come from the model's
+    server in its own shape (a `400` for a bad parameter, its own `429`).
 - **Incomplete lists:** if a session list has `warnings`, some sources failed. Do not conclude that
   nothing is running.
 - **No secrets in chat:** never print, echo or write tokens into chat or files.
 - **Changes go through agents:** the file and git endpoints are read-only. Changes are made by
   agent sessions.
+- **Models cost money or GPU time.** Paid models are billed to me, and a local GPU serves one job
+  at a time. Use the smallest model that does the job, and ask me before a large batch on a paid
+  model.
 
 ## Connect a new machine
 

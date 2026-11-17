@@ -33,8 +33,9 @@ name = "grok"
 sha256 = "9f2c…"                   # from `safe-grokbot-bridge token`
 
 [[tokens]]
-name = "laptop-scripts"
+name = "second-brain"              # a program that only calls models
 sha256 = "51ab…"
+models_only = true
 
 [limits]
 auth_failures = 10
@@ -42,6 +43,7 @@ auth_window_secs = 600
 auth_block_secs = 900
 requests_per_minute = 300
 max_sessions = 8
+max_model_requests = 16
 
 [sessions]
 runner = "auto"                    # auto | tmux | headless
@@ -65,6 +67,27 @@ args = ["-m", "gpt-6.1-sol", "-c", "model_reasoning_effort=\"xhigh\""]
 
 [agents.aider]                     # any other terminal program (tmux only)
 command = "aider"
+
+[models.qwen]                      # the name clients send as `model`
+type = "chat"
+url = "http://10.0.0.5:8000/v1"
+model = "Qwen/Qwen3-32B"
+description = "Local Qwen3 32B, fast. Thinking is off unless you turn it on."
+defaults = { chat_template_kwargs = { enable_thinking = false } }
+
+[models.embed]
+type = "embedding"
+url = "http://10.0.0.5:8001/v1"
+model = "Qwen/Qwen3-Embedding-4B"
+defaults = { dimensions = 1024 }
+
+[models.opus]
+type = "chat"
+api = "anthropic"
+url = "https://api.anthropic.com/v1"
+model = "claude-opus-5-5"
+api_key = "sk-ant-…"
+tokens = ["grok"]
 
 [[workspaces]]
 path = "/home/me/projects"
@@ -98,10 +121,17 @@ Its presence enables TLS.
 
 ## `[[tokens]]`
 
-Every client authenticates with `Authorization: Bearer <token>`. Create tokens with
-`safe-grokbot-bridge token --name <name>`: it prints the token once and the snippet with its
-SHA-256. Names appear in the audit log. Remove an entry to revoke a token. At least one token is
-required.
+Every client authenticates with `Authorization: Bearer <token>`. A request without that header
+may carry the token in `x-api-key` instead, which is where Anthropic's client library puts its
+API key. Create tokens with `safe-grokbot-bridge token --name <name>`: it prints the token once
+and the snippet with its SHA-256. Names appear in the audit log. Remove an entry to revoke a
+token. At least one token is required.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `name` | required | Shown in the audit log and used in a model's `tokens`. |
+| `sha256` | required | SHA-256 of the token, from `safe-grokbot-bridge token`. |
+| `models_only` | `false` | The token may call the model endpoints and read `GET /openapi.json`, nothing else. Give such a token to a program that only needs models, so that a leaked program key cannot reach folders, git or agents. |
 
 ## `[limits]`
 
@@ -112,6 +142,7 @@ required.
 | `auth_block_secs` | 900 | … for this long (`429` with `Retry-After`). |
 | `requests_per_minute` | 300 | Per token. A long-poll counts as one request. |
 | `max_sessions` | 8 | Sessions started by the bridge that may run at the same time. |
+| `max_model_requests` | 16 | Model calls running at the same time. A further call waits up to 10 seconds for a free slot, then gets `429 models_busy`. |
 
 ## `[sessions]`
 
@@ -160,6 +191,44 @@ The bridge adds the flags for `model` and `effort` itself:
 - Claude Code: `--model`, `--effort`
 - Codex: `-m`, `-c model_reasoning_effort="…"`
 - Hermes: `-m`, `--reasoning`
+
+## `[models.<name>]`
+
+Models the clients may call through the bridge, with stock OpenAI and Anthropic client libraries
+and the bridge token as their API key. The table name is the name clients send as `model`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `type` | required | `chat`, `vision` (a chat model that also accepts images), `embedding`, `reranker`, `speech-to-text`, `text-to-speech` or `image-generator`. It decides the endpoint that calls the model. |
+| `api` | `openai` | `openai` or `anthropic`, the request format the upstream speaks. Only `chat` and `vision` models can be `anthropic`. |
+| `url` | required | Base URL of the upstream API with its version prefix, e.g. `http://10.0.0.5:8000/v1` or `https://api.anthropic.com/v1`. `http` or `https`; no query, fragment or user name and password. A trailing `/` is ignored. |
+| `model` | the table name | The upstream's name for the model. |
+| `api_key` | none | Sent to the upstream (`Authorization: Bearer` for `openai`, `x-api-key` for `anthropic`). Clients never see it. |
+| `defaults` | none | Request parameters filled in when a request does not set them, e.g. `chat_template_kwargs` or `dimensions`. |
+| `tokens` | every token | Names of `[[tokens]]` that may call the model, typically for a paid model. |
+| `description` | none | Free text shown in the model list: what the model is good for. |
+
+**Names.** Lowercase letters, digits, `-` and `_`, starting with a letter or digit, up to 64
+characters. A `.` is not allowed, because TOML reads `[models.gpt-4.1]` as nested tables: name
+such a model `gpt-4-1` and set `model = "gpt-4.1"`.
+
+**Defaults.** The client's value always wins. Objects are merged key by key at every depth;
+arrays and other values are replaced whole. A default `chat_template_kwargs = {
+enable_thinking = false }` therefore stays when a client sends another key in
+`chat_template_kwargs`, and gives way when the client sends `enable_thinking` itself. Defaults
+are per model: set `dimensions = 1024` only on embedding models that support Matryoshka
+dimensions, because others reject the parameter. For `speech-to-text` models the defaults must be
+strings, numbers or booleans, because they are sent as form fields (`language = "cs"`).
+
+`check` asks every model's upstream once whether it is reachable, accepts the key and knows the
+model, and reports problems as warnings: a home GPU server may be off while `check` runs.
+
+> **The config file holds keys now.** Keep it, and every copy of it (backups, examples with real
+> keys), outside the workspaces, and readable only by you (`chmod 600`). The bridge never serves
+> its own config file through the file endpoints, and `check` warns when the file lies in a
+> workspace or others can read it. A token that may start or drive agents can still read it
+> through an agent, because agents run as your user: such a token is worth as much as an SSH key,
+> and with models configured it is also worth money at the paid providers behind them.
 
 ## `[[workspaces]]`
 
@@ -235,4 +304,47 @@ allow = ["files", "git", "sessions"]
 [[workspaces]]
 path = "/home/me/projects/sandbox"
 allow = ["files", "git", "sessions", "input", "start"]
+```
+
+**Models on a vLLM server at home:**
+
+```toml
+[models.qwen]
+type = "chat"
+url = "http://10.0.0.5:8000/v1"
+model = "Qwen/Qwen3-32B"
+defaults = { chat_template_kwargs = { enable_thinking = false } }
+
+[models.embed]
+type = "embedding"
+url = "http://10.0.0.5:8001/v1"
+model = "Qwen/Qwen3-Embedding-4B"
+defaults = { dimensions = 1024 }
+
+[models.rerank]
+type = "reranker"
+url = "http://10.0.0.5:8002/v1"
+model = "Qwen/Qwen3-Reranker-4B"
+
+[models.whisper]
+type = "speech-to-text"
+url = "http://10.0.0.5:8003/v1"
+model = "openai/whisper-large-v3"
+defaults = { language = "cs" }
+```
+
+**A paid model only one token may call:**
+
+```toml
+[[tokens]]
+name = "second-brain"
+sha256 = "51ab…"
+models_only = true
+
+[models.gpt-4-1]                   # `.` is not allowed in the table name
+type = "chat"
+url = "https://api.openai.com/v1"
+model = "gpt-4.1"
+api_key = "sk-…"
+tokens = ["second-brain"]
 ```

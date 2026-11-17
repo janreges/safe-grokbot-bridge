@@ -11,7 +11,9 @@ own machines:
 - browse configured folders and their git history (read-only),
 - see the coding agents (Claude Code, Codex CLI, Hermes Agent) running there,
 - send them messages and read their answers,
-- start new agent sessions in an allowed folder, in tmux or headless, and stop them.
+- start new agent sessions in an allowed folder, in tmux or headless, and stop them;
+- call the models configured on the machine (local vLLM servers, paid APIs) with stock OpenAI
+  and Anthropic client libraries, while the upstream API keys stay in the config.
 
 One binary runs per machine as a daemon. It is reached through a Cloudflare Tunnel, or directly on
 a public IP using a self-signed certificate with public-key pinning. Every request needs a bearer
@@ -88,6 +90,7 @@ A test fails when `docs/openapi.json` is out of date, so regenerate it after any
 | `src/sessions.rs` | Session registry: list, start, input, output, stop, keep-alive |
 | `src/headless.rs` | Non-interactive agent turns (`claude -p`, `codex exec`, `hermes chat -Q`) |
 | `src/external.rs` | Experimental access to agent sessions running outside tmux |
+| `src/models.rs` | Models behind the bridge: endpoint table, selection, defaults, relay, probes |
 | `src/hook.rs` | `hook` subcommand: agent turn-complete events |
 | `src/procs.rs`, `src/exec.rs` | Process inspection and subprocess helpers |
 | `tests/` | Integration tests using fake agents |
