@@ -220,10 +220,19 @@ async fn a_listing_says_when_it_is_cut_short_and_what_to_do_next() {
         (Some(3), Some(true))
     );
     assert!(page["note"].as_str().unwrap().contains("offset=2"));
-    // The note names the next offset, and the next page holds the oldest message.
+    // The note names the next offset. Messages sent within one second may come in either order,
+    // so the two pages together must hold each of the three messages exactly once.
     let (_, next) = h.get("/v1/inbox?limit=2&offset=2").await;
     assert_eq!(next["messages"].as_array().unwrap().len(), 1);
-    assert_eq!(next["messages"][0]["subject"], "one");
+    let mut subjects: Vec<&str> = page["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(next["messages"].as_array().unwrap())
+        .map(|message| message["subject"].as_str().unwrap())
+        .collect();
+    subjects.sort();
+    assert_eq!(subjects, ["one", "three", "two"]);
     assert_eq!(next["truncated"].as_bool(), Some(false));
     assert!(next["note"].is_null());
     // Past the last message the page is empty, and it says so.
