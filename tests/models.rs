@@ -556,6 +556,74 @@ async fn a_busy_bridge_answers_models_busy() {
     assert_eq!(status, StatusCode::OK);
 }
 
+/// Over a real connection, from a client that sends its whole body before it reads the answer
+/// (as Python's `requests` and `httpx` do): it must get the refusal, not a reset, so the bridge
+/// reads the body before it answers.
+#[tokio::test]
+async fn a_refused_client_still_sending_gets_the_answer() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = release.clone();
+    let up = upstream(Router::new().route(
+        "/v1/embeddings",
+        post(move || {
+            let gate = gate.clone();
+            async move {
+                gate.notified().await;
+                Json(json!({"ok": true}))
+            }
+        }),
+    ))
+    .await;
+    let timing = Timing {
+        slot_wait: Duration::from_millis(100),
+        ..Timing::default()
+    };
+    let h = harness_timed(
+        "[\"files\"]",
+        &format!(
+            "[limits]\nmax_model_requests = 1\n{}",
+            model_toml("embed", "embedding", &up.url, "")
+        ),
+        timing,
+    )
+    .await;
+    let address = h.serve().await.replace("http://", "");
+    let first = call(
+        &h,
+        "/v1/embeddings",
+        json!({"model": "embed", "input": "a"}),
+    );
+    let second = async {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while up.count() == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Larger than the socket buffers, below the 32 MiB limit.
+        let body = json!({"model": "embed", "input": "x".repeat(30 * 1024 * 1024)}).to_string();
+        let head = format!(
+            "POST /v1/embeddings HTTP/1.1\r\nhost: {address}\r\nauthorization: Bearer {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            h.token,
+            body.len()
+        );
+        let mut stream = tokio::net::TcpStream::connect(&address).await.unwrap();
+        let sent = async {
+            stream.write_all(head.as_bytes()).await?;
+            stream.write_all(body.as_bytes()).await?;
+            let mut answer = String::new();
+            stream.read_to_string(&mut answer).await?;
+            Ok::<_, std::io::Error>(answer)
+        }
+        .await;
+        release.notify_one();
+        sent
+    };
+    let ((status, _, _), refused) = tokio::join!(first, second);
+    let refused = refused.expect("the refusal arrives instead of a reset");
+    assert!(refused.starts_with("HTTP/1.1 429"), "{refused}");
+    assert!(refused.contains("models_busy"), "{refused}");
+    assert_eq!(status, StatusCode::OK);
+}
+
 #[tokio::test]
 async fn a_silent_upstream_is_reported_in_time() {
     let up = upstream(Router::new().fallback(|| async {

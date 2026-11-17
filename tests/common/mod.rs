@@ -143,6 +143,18 @@ pub fn toml_str(path: &Path) -> String {
 }
 
 impl Harness {
+    /// Serves the bridge on a free local port, for tests that need a real connection.
+    pub async fn serve(&self) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = self
+            .router
+            .clone()
+            .into_make_service_with_connect_info::<SocketAddr>();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://127.0.0.1:{port}")
+    }
+
     /// Sends a prepared request from a local peer address, as the server would see it.
     pub async fn send(&self, mut request: Request<Body>) -> axum::response::Response {
         let peer: SocketAddr = "127.0.0.1:40000".parse().unwrap();
