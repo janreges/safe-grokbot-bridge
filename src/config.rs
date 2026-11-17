@@ -489,7 +489,7 @@ impl Config {
     }
 
     pub fn parse(text: &str, path: &Path) -> Result<Config> {
-        let raw: RawConfig = toml::from_str(text)?;
+        let raw: RawConfig = toml::from_str(text).map_err(|err| toml_error(err, text))?;
         let mut server = resolve_server(raw.server)?;
         if server.state_dir.is_relative() {
             // Relative to the config file, never to the working directory: the same path is
@@ -552,6 +552,18 @@ impl Config {
             _ => false,
         }
     }
+}
+
+/// The position of a config that is not valid TOML, without the text around it: that text may be
+/// an `api_key`, and the error would print it into the log.
+fn toml_error(err: toml::de::Error, text: &str) -> anyhow::Error {
+    let position = err.span().map_or_else(String::new, |span| {
+        let before = text.get(..span.start).unwrap_or_default();
+        let line = before.matches('\n').count() + 1;
+        let column = before.len() - before.rfind('\n').map_or(0, |at| at + 1) + 1;
+        format!(" at line {line}, column {column}")
+    });
+    anyhow::anyhow!("TOML error{position}: {}", err.message())
 }
 
 fn resolve_server(raw: RawServer) -> Result<Server> {
@@ -1247,5 +1259,17 @@ mod tests {
         assert!(!ws.is_denied(Path::new("private/notes.txt")));
         assert!(!ws.is_denied(Path::new("src/main.rs")));
         assert!(!ws.is_denied(Path::new(".gitignore")));
+    }
+
+    #[test]
+    fn a_syntax_error_names_the_line_without_echoing_it() {
+        // The line with the unterminated key is the one that must stay out of the error.
+        let text = format!(
+            "{TOKEN}[models.qwen]\ntype = \"chat\"\nurl = \"http://h/v1\"\napi_key = \"sk-SECRET-123\n"
+        );
+        let err = Config::parse(&text, Path::new("t.toml")).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(!message.contains("sk-SECRET-123"), "{message}");
+        assert!(message.contains("line 7"), "{message}");
     }
 }
