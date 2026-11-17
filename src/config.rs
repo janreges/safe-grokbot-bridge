@@ -149,6 +149,8 @@ pub struct Config {
     pub path: PathBuf,
     /// The config file's canonical path, so that the file endpoints can refuse to serve it.
     pub canonical_path: Option<PathBuf>,
+    /// The same file's identity, so that a hard link under another name is refused as well.
+    pub file_id: Option<same_file::Handle>,
     pub server: Server,
     pub tokens: Vec<Token>,
     pub limits: Limits,
@@ -515,6 +517,7 @@ impl Config {
         Ok(Config {
             path: path.to_path_buf(),
             canonical_path: dunce::canonicalize(path).ok(),
+            file_id: same_file::Handle::from_path(path).ok(),
             server,
             tokens,
             limits: raw.limits,
@@ -538,9 +541,16 @@ impl Config {
         self.tokens.iter().find(|t| t.name == name)
     }
 
-    /// Whether a canonical path is this bridge's own config file, which may hold API keys.
+    /// Whether a canonical path is this bridge's own config file, which may hold API keys. A hard
+    /// link has another path but is the same file, so the file's identity decides as well.
     pub fn is_config_file(&self, canonical: &Path) -> bool {
-        self.canonical_path.as_deref() == Some(canonical)
+        if self.canonical_path.as_deref() == Some(canonical) {
+            return true;
+        }
+        match (&self.file_id, same_file::Handle::from_path(canonical)) {
+            (Some(config), Ok(candidate)) => *config == candidate,
+            _ => false,
+        }
     }
 }
 

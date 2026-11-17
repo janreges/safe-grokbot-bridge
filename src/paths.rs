@@ -112,6 +112,17 @@ pub fn require_git_scope(
         )));
     };
     require(workspace, Capability::Git)?;
+    // A diff or an old revision of a file would carry the keys of the config, whatever path asked.
+    if config
+        .canonical_path
+        .as_deref()
+        .is_some_and(|file| file.starts_with(toplevel))
+    {
+        return Err(ApiError::forbidden(format!(
+            "The git repository at `{}` holds this bridge's configuration file, which is never served. Git would show its contents in diffs and history, so git access to this repository is refused.",
+            toplevel.display()
+        )));
+    }
     if let Some(nested) = config.workspaces.iter().find(|ws| {
         ws.root.starts_with(toplevel) && ws.root != workspace.root && !ws.allows(Capability::Git)
     }) {
@@ -267,6 +278,49 @@ mod tests {
             resolve(&cfg, "relative/path").err().unwrap().code,
             "invalid_request"
         );
+    }
+
+    /// Writes a config file at `file` and loads it, so that `file` is the bridge's own config.
+    fn config_at(file: &Path, workspaces: &[(&Path, &str)]) -> Config {
+        let mut text = String::from(
+            "[[tokens]]\nname = \"t\"\nsha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"\n",
+        );
+        for (path, allow) in workspaces {
+            text.push_str(&format!(
+                "[[workspaces]]\npath = {}\nallow = {allow}\n",
+                toml::Value::String(path.display().to_string())
+            ));
+        }
+        std::fs::write(file, text).unwrap();
+        Config::load(file).unwrap()
+    }
+
+    #[test]
+    fn a_hard_link_to_the_config_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dunce::canonicalize(dir.path()).unwrap();
+        // The config lies in the workspace, which `check` warns about, and a second name links to it.
+        let config_file = ws.join("bridge.toml");
+        let cfg = config_at(&config_file, &[(&ws, "[\"files\"]")]);
+        let alias = ws.join("notes.toml");
+        std::fs::hard_link(&config_file, &alias).unwrap();
+        assert_eq!(
+            resolve(&cfg, alias.to_str().unwrap()).err().unwrap().code,
+            "denied"
+        );
+        std::fs::write(ws.join("other.txt"), "x").unwrap();
+        assert!(resolve(&cfg, ws.join("other.txt").to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn a_repository_holding_the_config_file_refuses_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dunce::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        let cfg = config_at(&repo.join("bridge.toml"), &[(&repo, "[\"git\"]")]);
+        let err = require_git_scope(&cfg, &repo, &[repo.join(".git")]).unwrap_err();
+        assert_eq!(err.code, "forbidden");
+        assert!(err.message.contains("configuration file"), "{}", err.message);
     }
 
     #[cfg(unix)]
