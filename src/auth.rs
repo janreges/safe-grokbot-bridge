@@ -314,6 +314,34 @@ mod tests {
     }
 
     #[test]
+    fn credential_comes_from_authorization_or_x_api_key() {
+        let headers = |pairs: &[(&'static str, &'static str)]| {
+            let mut map = HeaderMap::new();
+            for (name, value) in pairs {
+                map.insert(*name, value.parse().unwrap());
+            }
+            map
+        };
+        assert_eq!(
+            credential(&headers(&[("authorization", "Bearer a")])).as_deref(),
+            Some("Bearer a")
+        );
+        assert_eq!(
+            credential(&headers(&[("x-api-key", "sgb_k")])).as_deref(),
+            Some("Bearer sgb_k")
+        );
+        assert_eq!(
+            credential(&headers(&[
+                ("authorization", "Bearer a"),
+                ("x-api-key", "sgb_k")
+            ]))
+            .as_deref(),
+            Some("Bearer a")
+        );
+        assert_eq!(credential(&headers(&[])), None);
+    }
+
+    #[test]
     fn client_ip_header_is_trusted_only_from_loopback() {
         let (auth, _) = auth("");
         let mut headers = HeaderMap::new();
@@ -325,6 +353,16 @@ mod tests {
         headers.insert("cf-connecting-ip", "not-an-ip".parse().unwrap());
         assert_eq!(auth.client_ip(local, &headers).to_string(), "127.0.0.1");
     }
+}
+
+/// The request's credential as an `Authorization` value: that header, or `Bearer <x-api-key>`
+/// when it is absent. Anthropic's client library sends its API key in `x-api-key`.
+pub fn credential(headers: &HeaderMap) -> Option<String> {
+    if let Some(value) = headers.get(axum::http::header::AUTHORIZATION) {
+        return value.to_str().ok().map(str::to_string);
+    }
+    let key = headers.get("x-api-key")?.to_str().ok()?;
+    Some(format!("Bearer {}", key.trim()))
 }
 
 /// Who made a request; inserted into request extensions by [`middleware`].
@@ -346,11 +384,8 @@ pub async fn middleware(
     let ip = app.auth.client_ip(peer, request.headers());
     let method = request.method().clone();
     let uri = request.uri().clone();
-    let authorization = request
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-    let token = match app.auth.check(ip, authorization, Instant::now()) {
+    let authorization = credential(request.headers());
+    let token = match app.auth.check(ip, authorization.as_deref(), Instant::now()) {
         Ok(token) => token,
         Err(err) => {
             // Requests from a blocked address are not logged one by one (the block itself is),

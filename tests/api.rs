@@ -2,7 +2,8 @@
 
 mod common;
 
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use common::{harness, url};
 use safe_grokbot_bridge::api;
 use serde_json::Value;
@@ -92,6 +93,30 @@ async fn capabilities_are_enforced() {
             .as_str()
             .unwrap()
             .contains("does not allow `files`")
+    );
+}
+
+#[tokio::test]
+async fn a_token_in_x_api_key_is_accepted() {
+    let h = harness("[\"files\"]", "[limits]\nauth_failures = 2\n").await;
+    let call = |key: String| {
+        let request = Request::builder()
+            .uri("/v1/info")
+            .header("x-api-key", key)
+            .body(Body::empty())
+            .unwrap();
+        h.send(request)
+    };
+    assert_eq!(call(h.token.clone()).await.status(), StatusCode::OK);
+    // A wrong key counts as a failed attempt like a wrong bearer token: the second one blocks the
+    // address.
+    assert_eq!(
+        call("sgb_wrong".into()).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call("sgb_wrong".into()).await.status(),
+        StatusCode::TOO_MANY_REQUESTS
     );
 }
 

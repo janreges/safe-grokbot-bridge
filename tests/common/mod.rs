@@ -48,6 +48,13 @@ pub fn toml_str(path: &Path) -> String {
 }
 
 impl Harness {
+    /// Sends a prepared request from a local peer address, as the server would see it.
+    pub async fn send(&self, mut request: Request<Body>) -> axum::response::Response {
+        let peer: SocketAddr = "127.0.0.1:40000".parse().unwrap();
+        request.extensions_mut().insert(ConnectInfo(peer));
+        self.router.clone().oneshot(request).await.unwrap()
+    }
+
     pub async fn request(
         &self,
         method: &str,
@@ -66,10 +73,7 @@ impl Harness {
             }
             None => Body::empty(),
         };
-        let mut request = request.body(body).unwrap();
-        let peer: SocketAddr = "127.0.0.1:40000".parse().unwrap();
-        request.extensions_mut().insert(ConnectInfo(peer));
-        let response = self.router.clone().oneshot(request).await.unwrap();
+        let response = self.send(request.body(body).unwrap()).await;
         let status = response.status();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body = serde_json::from_slice(&bytes)
