@@ -15,6 +15,7 @@ pub mod files;
 pub mod git;
 pub mod headless;
 pub mod hook;
+pub mod inbox;
 pub mod models;
 pub mod paths;
 pub mod procs;

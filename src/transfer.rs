@@ -491,7 +491,7 @@ fn stored_name(now: SystemTime, random: &str, extension: &str) -> String {
 }
 
 /// Four characters from `a-z0-9`, against collisions within one second.
-fn random_part() -> String {
+pub(crate) fn random_part() -> String {
     const ALPHABET: &[u8; 36] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let mut bytes = [0u8; 4];
     getrandom::fill(&mut bytes).expect("the operating system's random number generator failed");
