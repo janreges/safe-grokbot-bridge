@@ -1809,6 +1809,600 @@
         }
       }
     },
+    "/v1/inbox": {
+      "get": {
+        "tags": [
+          "inbox"
+        ],
+        "summary": "Lists the inbox: messages the owner left on this machine for Grok Bot, newest first, without\nbodies. Read each message you may take with GET /v1/inbox/{id}, then claim it, so that no other\nbot takes it as well. Claim only messages that match the conversation you are in.",
+        "operationId": "list_inbox",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Which messages: `unread` (the default; no bot has taken them), `claimed`, `released` (a bot\ngave them back), or `all`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Only messages for this bot and for every bot. Pass your own bot name, for example `Homelab`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Messages to return, 1–200 (default 50). The newest come first.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The messages that match",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboxList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid `state` or `limit`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is limited to models",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/inbox/{id}": {
+      "get": {
+        "tags": [
+          "inbox"
+        ],
+        "summary": "One inbox message with its full Markdown body. Reading changes nothing; claim the message to\ntake it.",
+        "operationId": "get_inbox_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Message id from GET /v1/inbox",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The message, with its `body`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is limited to models",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No message with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/inbox/{id}/attachments/{name}": {
+      "get": {
+        "tags": [
+          "inbox"
+        ],
+        "summary": "The bytes of one attachment of an inbox message, by the name the message lists. The limits are\nthose of a file download: at most 96 MB, and the transfer slots are shared with uploads.",
+        "operationId": "get_inbox_attachment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Message id from GET /v1/inbox",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Attachment name, as the message lists it",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The attachment's bytes",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No message, or no attachment by that name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`too_large`: the attachment is larger than 96 MB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`transfers_busy`: 4 transfers are running; wait `Retry-After` seconds, or the rate limit or an authentication lockout (wait `Retry-After` seconds)",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/inbox/{id}/claim": {
+      "post": {
+        "tags": [
+          "inbox"
+        ],
+        "summary": "Takes an inbox message for a bot. Read the message in full before you claim it, and claim only\nwhat matches the conversation you are in. A message addressed to another bot (`to`) cannot be\ntaken. Taking it again as the bot that holds it changes nothing. If another bot holds it, the\nanswer is 409 `already_claimed` and names the holder.",
+        "operationId": "claim_inbox_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Message id from GET /v1/inbox",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InboxAction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Claimed; the message as it is now, without `body`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid `bot` or `note`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is limited to models",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No message with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`already_claimed`: another bot holds it; `addressed_to_other`: it is for a different bot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The JSON body is larger than 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not sent as `Content-Type: application/json`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The JSON body does not match the schema (a missing or unknown field, or a wrong type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/inbox/{id}/release": {
+      "post": {
+        "tags": [
+          "inbox"
+        ],
+        "summary": "Gives back a message this bot had claimed, so that another bot may take it. Only the bot that\nholds the message may do this; the note says why, or where the message should go.",
+        "operationId": "release_inbox_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Message id from GET /v1/inbox",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InboxAction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Released; the message as it is now, without `body`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid `bot` or `note`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is limited to models",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No message with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`not_claimed`: nobody holds it; `not_yours`: another bot holds it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The JSON body is larger than 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not sent as `Content-Type: application/json`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The JSON body does not match the schema (a missing or unknown field, or a wrong type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/info": {
       "get": {
         "tags": [
@@ -2885,6 +3479,31 @@
           "generic"
         ]
       },
+      "Attachment": {
+        "type": "object",
+        "description": "A file attached to a message.",
+        "required": [
+          "name",
+          "size",
+          "sha256"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The name the sender gave the file. Download it by this name."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "SHA-256 of the content, in lowercase hex."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Size in bytes.",
+            "minimum": 0
+          }
+        }
+      },
       "Capability": {
         "type": "string",
         "description": "Folder-level permission granted to clients.",
@@ -3132,6 +3751,61 @@
           }
         }
       },
+      "InboxAction": {
+        "type": "object",
+        "description": "A bot's claim or release of a message.",
+        "required": [
+          "bot"
+        ],
+        "properties": {
+          "bot": {
+            "type": "string",
+            "description": "The bot that takes or gives back the message, for example `Homelab`. At most 64 characters."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the message is taken, or where it should go instead. At most 1000 bytes."
+          }
+        },
+        "additionalProperties": false
+      },
+      "InboxList": {
+        "type": "object",
+        "description": "A page of the inbox. Bodies are left out: read a message with GET /v1/inbox/{id} before you\nclaim it.",
+        "required": [
+          "messages",
+          "total",
+          "truncated"
+        ],
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "description": "Newest first."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to do next when the list is empty or cut short. Absent otherwise."
+          },
+          "total": {
+            "type": "integer",
+            "description": "How many messages match the filter in all.",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when `messages` holds fewer messages than `total`."
+          }
+        }
+      },
       "Info": {
         "type": "object",
         "description": "Overview of this machine and what this token may do here.",
@@ -3237,6 +3911,14 @@
         },
         "additionalProperties": false
       },
+      "Kind": {
+        "type": "string",
+        "description": "What a message asks for.",
+        "enum": [
+          "task",
+          "followup"
+        ]
+      },
       "LimitsInfo": {
         "type": "object",
         "required": [
@@ -3274,6 +3956,102 @@
             "format": "int32",
             "description": "Requests allowed per minute for this token.",
             "minimum": 0
+          }
+        }
+      },
+      "Message": {
+        "type": "object",
+        "description": "A message as stored and as the API shows it. The body is in the API's single-message answer\nonly; listings leave it out.",
+        "required": [
+          "id",
+          "created",
+          "kind",
+          "subject",
+          "state",
+          "attachments"
+        ],
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Attachment"
+            }
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Markdown body; only in `GET /v1/inbox/{id}`."
+          },
+          "claim_note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "claimed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "claimed_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bot that claimed the message last; it holds the message only while `state` is\n`claimed`."
+          },
+          "created": {
+            "type": "string",
+            "description": "When the bridge stored the message, in UTC, RFC 3339."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable id, for example `2026-11-17.16-40-12.k7q2`."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/Kind"
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The folder the message concerns, if the sender named one."
+          },
+          "release_note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "released_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "released_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bot that gave the message back last."
+          },
+          "state": {
+            "$ref": "#/components/schemas/State"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bot the sender asked for. Without it, any bot may take the message."
           }
         }
       },
@@ -3640,6 +4418,15 @@
         },
         "additionalProperties": false
       },
+      "State": {
+        "type": "string",
+        "description": "Where a message stands.",
+        "enum": [
+          "unread",
+          "claimed",
+          "released"
+        ]
+      },
       "StoredFile": {
         "type": "object",
         "required": [
@@ -3772,6 +4559,10 @@
     {
       "name": "git",
       "description": "Read-only git access"
+    },
+    {
+      "name": "inbox",
+      "description": "Messages the owner leaves for Grok Bot: read, claim, give back"
     },
     {
       "name": "sessions",
