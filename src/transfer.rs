@@ -130,7 +130,19 @@ pub async fn upload(app: &AppState, dir: Result<String, ApiError>, request: Requ
         }
     };
     let mut created = Created(Vec::new());
-    let stored = store(&mut form, &inbox, &mut created).await;
+    // A client that trickles its files must not hold a transfer slot for ever. The partial files
+    // are removed with `created` once this function returns the error.
+    let stored = match tokio::time::timeout(
+        models::BODY_DEADLINE,
+        store(&mut form, &inbox, &mut created),
+    )
+    .await
+    {
+        Ok(stored) => stored,
+        Err(_) => Err(ApiError::bad_request(
+            "The upload did not arrive in time. Nothing was stored; send it again.",
+        )),
+    };
     let files = match stored {
         Ok(files) if files.is_empty() => Err(ApiError::bad_request(
             "The form has no file. Send each file as a part with a file name, as `curl -F 'file=@report.pdf'` does.",
@@ -151,9 +163,13 @@ pub async fn upload(app: &AppState, dir: Result<String, ApiError>, request: Requ
         }
         Err(mut err) => {
             // The rest of the form is read, so that the client gets this answer and not a reset.
-            while let Ok(Some(mut field)) = form.next_field().await {
-                while let Ok(Some(_)) = field.chunk().await {}
-            }
+            // Only for a short while: a client still sending after the deadline gets the reset.
+            let rest = async {
+                while let Ok(Some(mut field)) = form.next_field().await {
+                    while let Ok(Some(_)) = field.chunk().await {}
+                }
+            };
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), rest).await;
             drop(created);
             if err.status == StatusCode::PAYLOAD_TOO_LARGE {
                 err = too_large();
