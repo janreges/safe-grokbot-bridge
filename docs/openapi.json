@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "safe-grokbot-bridge",
-    "description": "A narrow, authenticated API that lets a remote AI agent work with this machine: read the folders it was given access to and their git history, see the coding-agent sessions (Claude Code, Codex, Hermes) running there, talk to them, and start new ones.\n\nUsage notes:\n- Every request except `GET /healthz` needs `Authorization: Bearer <token>`.\n- Start with `GET /v1/info`: it lists the folders (workspaces) you may access and what you may do in each (`files`, `git`, `sessions`, `input`, `start`), plus the available agents.\n- All paths are absolute. A session's `cwd` can be passed straight to the file and git endpoints.\n- Agents work for minutes. After sending input, call `GET /v1/sessions/{id}?wait=60` to wait until the session stops working instead of polling in a tight loop.\n- Errors have the shape `{\"error\": {\"code\": ..., \"message\": ...}}`; the message says what to do.",
+    "description": "A narrow, authenticated API that lets a remote AI agent work with this machine: read the folders it was given access to and their git history, see the coding-agent sessions (Claude Code, Codex, Hermes) running there, talk to them, and start new ones.\n\nUsage notes:\n- Every request except `GET /healthz` needs `Authorization: Bearer <token>`.\n- Start with `GET /v1/info`: it lists the folders (workspaces) you may access and what you may do in each (`files`, `git`, `sessions`, `input`, `start`), plus the available agents.\n- All paths are absolute. A session's `cwd` can be passed straight to the file and git endpoints.\n- Agents work for minutes. After sending input, call `GET /v1/sessions/{id}?wait=60` to wait until the session stops working instead of polling in a tight loop.\n- Models configured on this machine (chat, vision, embedding, reranker, speech-to-text, text-to-speech, image generation) are called through OpenAI- and Anthropic-compatible endpoints under `/v1`, so stock client libraries work with the bridge token as their API key. `GET /v1/models` lists them with the endpoint to call.\n- Errors have the shape `{\"error\": {\"code\": ..., \"message\": ...}}`; the message says what to do.",
     "license": {
       "name": "MIT"
     },
@@ -908,6 +908,86 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Info"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Lists the models this token may call, in the shape of OpenAI's model list, with the endpoint\nthat calls each one and the defaults the bridge fills in. The list shows what the owner\nconfigured; it does not contact the models, so a listed model can still be switched off.",
+        "operationId": "list_models",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "description": "Only models of this type: `chat`, `vision`, `embedding`, `reranker`, `speech-to-text`,\n`text-to-speech` or `image-generator`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The models you may call; `note` says why the list is empty",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown `type`; the message lists the valid ones",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -1897,6 +1977,7 @@
           "tmux",
           "default_runner",
           "external_sessions",
+          "models",
           "limits"
         ],
         "properties": {
@@ -1920,6 +2001,13 @@
           },
           "limits": {
             "$ref": "#/components/schemas/LimitsInfo"
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelInfo"
+            },
+            "description": "Models this token may call; `GET /v1/models` lists the same with a `type` filter."
           },
           "name": {
             "type": "string",
@@ -1985,9 +2073,15 @@
         "required": [
           "requests_per_minute",
           "max_sessions",
-          "max_wait_secs"
+          "max_wait_secs",
+          "max_model_requests"
         ],
         "properties": {
+          "max_model_requests": {
+            "type": "integer",
+            "description": "Model calls the bridge runs at the same time; further calls wait up to 10 seconds for a\nfree slot, then get 429 `models_busy`.",
+            "minimum": 0
+          },
           "max_sessions": {
             "type": "integer",
             "description": "Sessions started by the bridge that may run at the same time.",
@@ -2006,6 +2100,117 @@
             "minimum": 0
           }
         }
+      },
+      "ModelApi": {
+        "type": "string",
+        "description": "The API format a model's upstream speaks.",
+        "enum": [
+          "openai",
+          "anthropic"
+        ]
+      },
+      "ModelInfo": {
+        "type": "object",
+        "description": "A model you may call through this bridge.",
+        "required": [
+          "id",
+          "object",
+          "created",
+          "owned_by",
+          "type",
+          "api",
+          "endpoint",
+          "upstream_model",
+          "defaults"
+        ],
+        "properties": {
+          "api": {
+            "$ref": "#/components/schemas/ModelApi",
+            "description": "The request format: `openai` or `anthropic`."
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the bridge started, in Unix seconds; client libraries expect the field.",
+            "minimum": 0
+          },
+          "defaults": {
+            "type": "object",
+            "description": "Request parameters the bridge fills in when your request does not set them. Your values\nwin; objects are merged key by key."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the model is good for, written by the machine's owner."
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "The endpoint that calls this model, e.g. `/v1/chat/completions`."
+          },
+          "id": {
+            "type": "string",
+            "description": "The name to send as `model`."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `model`."
+          },
+          "owned_by": {
+            "type": "string",
+            "description": "Always `safe-grokbot-bridge`."
+          },
+          "type": {
+            "$ref": "#/components/schemas/ModelType",
+            "description": "What the model does: `chat`, `vision` (a chat model that also accepts images),\n`embedding`, `reranker`, `speech-to-text`, `text-to-speech` or `image-generator`."
+          },
+          "upstream_model": {
+            "type": "string",
+            "description": "The upstream's own name for the model; the bridge sends it in place of `id`."
+          }
+        }
+      },
+      "ModelList": {
+        "type": "object",
+        "description": "The models you may call, in the shape of OpenAI's model list.",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelInfo"
+            },
+            "description": "Sorted by `id`."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the list is empty, when it is."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `list`."
+          }
+        }
+      },
+      "ModelType": {
+        "type": "string",
+        "description": "What a model does, and so which endpoint calls it.",
+        "enum": [
+          "chat",
+          "vision",
+          "embedding",
+          "reranker",
+          "speech-to-text",
+          "text-to-speech",
+          "image-generator"
+        ]
       },
       "Runner": {
         "type": "string",
@@ -2345,6 +2550,10 @@
     {
       "name": "sessions",
       "description": "Agent sessions: list, start, talk to, stop"
+    },
+    {
+      "name": "models",
+      "description": "Models behind the bridge, called with OpenAI- and Anthropic-compatible requests"
     }
   ]
 }

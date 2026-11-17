@@ -17,11 +17,12 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::auth::{self, Caller};
-use crate::config::{AgentKind, Capability};
+use crate::config::{AgentKind, Capability, ModelType};
 use crate::error::{ApiError, ErrorBody};
 use crate::exec;
 use crate::files::{self, FileContent, FileList};
 use crate::git::{self, GitOutput, GitRequest};
+use crate::models::{self, ModelInfo, ModelList};
 use crate::paths;
 use crate::server::AppState;
 use crate::sessions::{InputRequest, MAX_WAIT_SECS, Runner, Session, SessionList, StartRequest};
@@ -40,6 +41,10 @@ in each (`files`, `git`, `sessions`, `input`, `start`), plus the available agent
 - All paths are absolute. A session's `cwd` can be passed straight to the file and git endpoints.
 - Agents work for minutes. After sending input, call `GET /v1/sessions/{id}?wait=60` to wait until \
 the session stops working instead of polling in a tight loop.
+- Models configured on this machine (chat, vision, embedding, reranker, speech-to-text, \
+text-to-speech, image generation) are called through OpenAI- and Anthropic-compatible endpoints \
+under `/v1`, so stock client libraries work with the bridge token as their API key. \
+`GET /v1/models` lists them with the endpoint to call.
 - Errors have the shape `{\"error\": {\"code\": ..., \"message\": ...}}`; the message says what to do.";
 
 #[derive(OpenApi)]
@@ -53,6 +58,7 @@ the session stops working instead of polling in a tight loop.
         (name = "files", description = "Read-only file access"),
         (name = "git", description = "Read-only git access"),
         (name = "sessions", description = "Agent sessions: list, start, talk to, stop"),
+        (name = "models", description = "Models behind the bridge, called with OpenAI- and Anthropic-compatible requests"),
     )
 )]
 struct ApiDoc;
@@ -81,7 +87,9 @@ fn api_routes() -> OpenApiRouter<AppState> {
 
 /// Endpoints every token may call, `models_only` tokens included.
 fn open_routes() -> OpenApiRouter<AppState> {
-    OpenApiRouter::with_openapi(ApiDoc::openapi()).routes(routes!(openapi_document))
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(openapi_document))
+        .routes(routes!(list_models))
 }
 
 /// Endpoints closed to `models_only` tokens.
@@ -325,6 +333,8 @@ pub struct Info {
     pub default_runner: Runner,
     /// Whether sessions running outside tmux can take input (experimental).
     pub external_sessions: bool,
+    /// Models this token may call; `GET /v1/models` lists the same with a `type` filter.
+    pub models: Vec<ModelInfo>,
     pub limits: LimitsInfo,
 }
 
@@ -368,6 +378,9 @@ pub struct LimitsInfo {
     pub max_sessions: usize,
     /// Maximum `wait` for long-polling a session, in seconds.
     pub max_wait_secs: u64,
+    /// Model calls the bridge runs at the same time; further calls wait up to 10 seconds for a
+    /// free slot, then get 429 `models_busy`.
+    pub max_model_requests: usize,
 }
 
 /// Describes this machine: version, agents, the workspaces you may access and the limits.
@@ -376,7 +389,7 @@ pub struct LimitsInfo {
     (status = 200, description = "This machine, its agents and the workspaces you may access", body = Info),
     (status = 401, description = "Missing or invalid token", body = ErrorBody),
 ))]
-async fn info(State(app): State<AppState>) -> Json<Info> {
+async fn info(State(app): State<AppState>, Extension(caller): Extension<Caller>) -> Json<Info> {
     let config = &app.config;
     Json(Info {
         name: config.server.name.clone(),
@@ -411,10 +424,12 @@ async fn info(State(app): State<AppState>) -> Json<Info> {
         },
         default_runner: app.sessions.default_runner(),
         external_sessions: config.experimental.external_sessions,
+        models: models::list(config, &caller.token, None, started_secs(&app)).data,
         limits: LimitsInfo {
             requests_per_minute: config.limits.requests_per_minute,
             max_sessions: config.limits.max_sessions,
             max_wait_secs: MAX_WAIT_SECS,
+            max_model_requests: config.limits.max_model_requests,
         },
     })
 }
@@ -805,4 +820,55 @@ async fn stop_session(
 ) -> Result<Json<Session>, ApiError> {
     let id = session_id(id)?;
     app.sessions.stop(&id, &caller.token).await.map(Json)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------------------------
+
+fn started_secs(app: &AppState) -> u64 {
+    app.started_at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListModelsQuery {
+    /// Only models of this type: `chat`, `vision`, `embedding`, `reranker`, `speech-to-text`,
+    /// `text-to-speech` or `image-generator`.
+    pub r#type: Option<String>,
+}
+
+/// Lists the models this token may call, in the shape of OpenAI's model list, with the endpoint
+/// that calls each one and the defaults the bridge fills in. The list shows what the owner
+/// configured; it does not contact the models, so a listed model can still be switched off.
+#[utoipa::path(get, path = "/v1/models", tag = "models", params(ListModelsQuery), responses(
+    (status = 200, description = "The models you may call; `note` says why the list is empty", body = ModelList),
+    (status = 400, description = "Unknown `type`; the message lists the valid ones", body = ErrorBody),
+))]
+async fn list_models(
+    State(app): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    q: Result<Query<ListModelsQuery>, QueryRejection>,
+) -> Result<Json<ModelList>, ApiError> {
+    let q = query(q)?;
+    let kind = match q.r#type.as_deref() {
+        None | Some("") => None,
+        Some(text) => Some(ModelType::parse(text).ok_or_else(|| {
+            let valid: Vec<&str> = ModelType::ALL.iter().map(|k| k.as_str()).collect();
+            ApiError::bad_request(format!(
+                "Unknown model type `{}`. Valid types: {}.",
+                text.chars().take(50).collect::<String>(),
+                valid.join(", ")
+            ))
+        })?),
+    };
+    Ok(Json(models::list(
+        &app.config,
+        &caller.token,
+        kind,
+        started_secs(&app),
+    )))
 }

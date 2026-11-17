@@ -53,6 +53,11 @@ pub fn extra_token(name: &str, extra: &str) -> (String, String) {
     (token, toml)
 }
 
+/// A `[models.<name>]` table with `type`, `url` and the `extra` lines.
+pub fn model_toml(name: &str, kind: &str, url: &str, extra: &str) -> String {
+    format!("[models.{name}]\ntype = \"{kind}\"\nurl = \"{url}\"\n{extra}\n")
+}
+
 pub fn toml_str(path: &Path) -> String {
     toml::Value::String(path.display().to_string()).to_string()
 }
