@@ -28,6 +28,12 @@ pub const MAX_JSON_BODY: usize = 32 * 1024 * 1024;
 /// Body limit of a form (an audio file to transcribe): under Cloudflare's 100 MB ceiling whether
 /// it counts in decimal or binary megabytes.
 pub const MAX_FORM_BODY: usize = 96_000_000;
+/// Most fields a form may carry. A transcription form has about ten; without a count a form of a
+/// million empty fields would cost far more memory than its byte limit.
+const MAX_FORM_FIELDS: usize = 64;
+/// Longest time a request body may take to arrive. A client that trickles bytes would otherwise
+/// hold a model slot, or an upload, for as long as it liked.
+pub(crate) const BODY_DEADLINE: Duration = Duration::from_secs(300);
 /// Sent when the client names no version; Anthropic's API requires the header.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const BUSY_RETRY_SECS: u64 = 5;
@@ -416,7 +422,7 @@ pub async fn call_json(
         drain(body, MAX_JSON_BODY).await;
         return busy(&app.config).into_response();
     };
-    let bytes = match read_body(body, MAX_JSON_BODY).await {
+    let bytes = match read_body(body, MAX_JSON_BODY, BODY_DEADLINE).await {
         Ok(Some(bytes)) => bytes,
         Ok(None) => {
             return ApiError::too_large(
@@ -470,12 +476,18 @@ pub async fn call_form(
         drain(request.into_body(), MAX_FORM_BODY).await;
         return busy(&app.config).into_response();
     };
-    let fields = match read_form(request).await {
-        Ok(fields) => fields,
-        Err(err) if err.status == StatusCode::PAYLOAD_TOO_LARGE => {
+    let fields = match tokio::time::timeout(BODY_DEADLINE, read_form(request)).await {
+        Ok(Ok(fields)) => fields,
+        Ok(Err(err)) if err.status == StatusCode::PAYLOAD_TOO_LARGE => {
             return too_large().into_response();
         }
-        Err(err) => return err.into_response(),
+        Ok(Err(err)) => return err.into_response(),
+        Err(_) => {
+            return ApiError::bad_request(
+                "The form did not arrive in time. Send it again; the whole form must arrive before the model is chosen.",
+            )
+            .into_response();
+        }
     };
     let (model, form) = match prepare_form(&app.config, endpoint, &caller.token, fields) {
         Ok(prepared) => prepared,
@@ -516,6 +528,11 @@ async fn read_form(request: Request) -> Result<Vec<FormField>, ApiError> {
     };
     let mut fields = Vec::new();
     while let Some(field) = form.next_field().await.map_err(unreadable)? {
+        if fields.len() == MAX_FORM_FIELDS {
+            return Err(ApiError::bad_request(format!(
+                "A transcription form may carry at most {MAX_FORM_FIELDS} fields; OpenAI's transcription API takes about ten. Remove the extra fields and send the form again."
+            )));
+        }
         let name = field.name().unwrap_or_default().to_string();
         let file_name = field.file_name().map(str::to_string);
         let content_type = field.content_type().map(str::to_string);
@@ -895,8 +912,23 @@ impl Relay {
     }
 }
 
-/// Reads a body of at most `limit` bytes; `None` when it is larger.
-async fn read_body(body: Body, limit: usize) -> Result<Option<Bytes>, axum::Error> {
+/// Reads a body of at most `limit` bytes; `None` when it is larger. The body must arrive within
+/// `deadline`, or the read fails.
+async fn read_body(
+    body: Body,
+    limit: usize,
+    deadline: Duration,
+) -> Result<Option<Bytes>, axum::Error> {
+    match tokio::time::timeout(deadline, collect_body(body, limit)).await {
+        Ok(result) => result,
+        Err(_) => Err(axum::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the body did not arrive in time",
+        ))),
+    }
+}
+
+async fn collect_body(body: Body, limit: usize) -> Result<Option<Bytes>, axum::Error> {
     let mut stream = body.into_data_stream();
     let mut out = Vec::new();
     while let Some(chunk) = stream.next().await {
@@ -912,14 +944,17 @@ async fn read_body(body: Body, limit: usize) -> Result<Option<Bytes>, axum::Erro
 /// Reads and discards a body before an early answer: the HTTP server would otherwise close a
 /// connection with a body in flight, and the client would see a reset instead of the answer.
 pub(crate) async fn drain(body: Body, limit: usize) {
-    let mut stream = body.into_data_stream();
-    let mut read = 0;
-    while let Some(Ok(chunk)) = stream.next().await {
-        read += chunk.len();
-        if read > limit {
-            break;
+    let read = async {
+        let mut stream = body.into_data_stream();
+        let mut read = 0;
+        while let Some(Ok(chunk)) = stream.next().await {
+            read += chunk.len();
+            if read > limit {
+                break;
+            }
         }
-    }
+    };
+    let _ = tokio::time::timeout(BODY_DEADLINE, read).await;
 }
 
 #[cfg(test)]
@@ -1007,5 +1042,40 @@ mod tests {
             "{}",
             api.message
         );
+    }
+
+    #[tokio::test]
+    async fn a_body_that_stops_arriving_is_cut() {
+        // A client that sends nothing more must not hold a model slot for ever.
+        let stalled = Body::from_stream(futures_util::stream::pending::<
+            Result<Bytes, std::io::Error>,
+        >());
+        let started = Instant::now();
+        assert!(
+            read_body(stalled, 1024, Duration::from_millis(50))
+                .await
+                .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn a_form_with_too_many_fields_is_refused() {
+        // Each field costs memory on both sides of the bridge, so a form has a field limit as well
+        // as the byte limit.
+        let mut body = String::new();
+        for index in 0..=MAX_FORM_FIELDS {
+            body.push_str(&format!(
+                "--sgb\r\nContent-Disposition: form-data; name=\"f{index}\"\r\n\r\nx\r\n"
+            ));
+        }
+        body.push_str("--sgb--\r\n");
+        let request = Request::builder()
+            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=sgb")
+            .body(Body::from(body))
+            .unwrap();
+        let err = read_form(request).await.err().unwrap();
+        assert_eq!(err.code, "invalid_request");
+        assert!(err.message.contains("fields"), "{}", err.message);
     }
 }
