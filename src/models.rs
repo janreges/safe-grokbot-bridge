@@ -503,7 +503,7 @@ async fn forward(
         );
         return upstream_error(model, started, err);
     }
-    relay(upstream, slot)
+    relay(upstream, slot, model, timing)
 }
 
 /// The start of an answer the bridge explains instead of relaying: at most 300 characters.
@@ -584,34 +584,36 @@ fn busy(config: &Config) -> ApiError {
 
 /// Relays the upstream's status, content type, `Retry-After` and body as it arrives. The body
 /// owns the upstream response and the slot, so dropping it ends the call and frees the slot.
-fn relay(upstream: reqwest::Response, slot: OwnedSemaphorePermit) -> Response {
+fn relay(
+    upstream: reqwest::Response,
+    slot: OwnedSemaphorePermit,
+    model: &Model,
+    timing: &Timing,
+) -> Response {
     let mut response = Response::builder().status(upstream.status());
     for name in [header::CONTENT_TYPE, header::RETRY_AFTER] {
         if let Some(value) = upstream.headers().get(&name) {
             response = response.header(name, value.clone());
         }
     }
+    let events = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/event-stream"));
     let state = Relay {
         upstream,
         _slot: slot,
+        model: model.name.clone(),
+        timing: timing.clone(),
+        events,
+        tail: Vec::new(),
+        silent: Duration::ZERO,
         done: false,
     };
     let body = futures_util::stream::unfold(state, |mut state| async move {
-        if state.done {
-            return None;
-        }
-        match state.upstream.chunk().await {
-            Ok(Some(chunk)) => Some((Ok(chunk), state)),
-            Ok(None) => None,
-            Err(err) => {
-                tracing::warn!(error = %err.without_url(), "a model answer broke off");
-                state.done = true;
-                Some((
-                    Err(std::io::Error::other("the model's answer broke off")),
-                    state,
-                ))
-            }
-        }
+        let item = state.next().await?;
+        Some((item, state))
     });
     response
         .body(Body::from_stream(body))
@@ -621,7 +623,69 @@ fn relay(upstream: reqwest::Response, slot: OwnedSemaphorePermit) -> Response {
 struct Relay {
     upstream: reqwest::Response,
     _slot: OwnedSemaphorePermit,
+    model: String,
+    timing: Timing,
+    /// The answer is a server-sent event stream.
+    events: bool,
+    /// The last bytes sent, to tell whether the stream is at an event boundary.
+    tail: Vec<u8>,
+    /// How long an event stream has been silent.
+    silent: Duration,
     done: bool,
+}
+
+impl Relay {
+    /// The next piece of the answer. An error aborts the connection, so that the client does not
+    /// take a cut answer for a complete one.
+    async fn next(&mut self) -> Option<std::io::Result<Bytes>> {
+        if self.done {
+            return None;
+        }
+        let wait = if self.events {
+            self.timing.keep_alive
+        } else {
+            self.timing.silence
+        };
+        loop {
+            match tokio::time::timeout(wait, self.upstream.chunk()).await {
+                Ok(Ok(Some(chunk))) => {
+                    self.silent = Duration::ZERO;
+                    self.tail.extend_from_slice(&chunk);
+                    let keep = self.tail.len().saturating_sub(4);
+                    self.tail.drain(..keep);
+                    return Some(Ok(chunk));
+                }
+                Ok(Ok(None)) => return None,
+                Ok(Err(err)) => {
+                    tracing::warn!(model = %self.model, error = %err.without_url(), "a model answer broke off");
+                    return self.fail("the model's answer broke off");
+                }
+                Err(_) if !self.events => {
+                    tracing::warn!(model = %self.model, "a model answer stayed silent too long and was cut");
+                    return self.fail("the model's answer stayed silent too long");
+                }
+                Err(_) => {
+                    self.silent += wait;
+                    if self.silent >= self.timing.stream_silence {
+                        tracing::warn!(model = %self.model, "a model stream stayed silent too long and was cut");
+                        return self.fail("the model's stream stayed silent too long");
+                    }
+                    // A comment line is only valid where an event may start.
+                    let boundary = self.tail.is_empty()
+                        || self.tail.ends_with(b"\n\n")
+                        || self.tail.ends_with(b"\r\n\r\n");
+                    if boundary {
+                        return Some(Ok(Bytes::from_static(b": keep-alive\n\n")));
+                    }
+                }
+            }
+        }
+    }
+
+    fn fail(&mut self, why: &'static str) -> Option<std::io::Result<Bytes>> {
+        self.done = true;
+        Some(Err(std::io::Error::other(why)))
+    }
 }
 
 /// Reads a body of at most `limit` bytes; `None` when it is larger.

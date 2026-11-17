@@ -590,3 +590,226 @@ async fn a_silent_upstream_is_reported_in_time() {
     assert!(!message(&body).contains("stream: true"), "{body}");
     assert!(started.elapsed() < Duration::from_secs(2));
 }
+
+/// One step of a scripted upstream answer.
+enum Step {
+    Send(&'static str),
+    Sleep(u64),
+    Wait(Arc<tokio::sync::Notify>),
+    Hang,
+}
+
+/// Notifies when it is dropped, that is when the upstream's answer is abandoned.
+struct Guard(Arc<tokio::sync::Notify>);
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
+/// An answer body that follows `steps`, holding `guard` until it is dropped.
+fn scripted(steps: Vec<Step>, guard: Option<Guard>) -> Body {
+    let stream = futures_util::stream::unfold(
+        (steps.into_iter(), guard),
+        |(mut steps, guard)| async move {
+            loop {
+                match steps.next()? {
+                    Step::Send(text) => {
+                        return Some((
+                            Ok::<_, std::io::Error>(axum::body::Bytes::from(text)),
+                            (steps, guard),
+                        ));
+                    }
+                    Step::Sleep(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
+                    Step::Wait(notify) => notify.notified().await,
+                    Step::Hang => std::future::pending::<()>().await,
+                }
+            }
+        },
+    );
+    Body::from_stream(stream)
+}
+
+/// A chat upstream whose answer to every call is built by `answer`.
+async fn scripted_upstream(
+    content_type: &'static str,
+    answer: impl Fn() -> Body + Clone + Send + Sync + 'static,
+) -> common::Upstream {
+    upstream(Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let answer = answer.clone();
+            async move { ([("content-type", content_type)], answer()) }
+        }),
+    ))
+    .await
+}
+
+/// Reads a body to its end or its first error: `(bytes read, whether it ended with an error)`.
+async fn read_all(response: axum::response::Response) -> (String, bool) {
+    let mut body = response.into_body();
+    let mut text = Vec::new();
+    loop {
+        match body.frame().await {
+            None => return (String::from_utf8_lossy(&text).into(), false),
+            Some(Err(_)) => return (String::from_utf8_lossy(&text).into(), true),
+            Some(Ok(frame)) => {
+                if let Ok(data) = frame.into_data() {
+                    text.extend_from_slice(&data);
+                }
+            }
+        }
+    }
+}
+
+async fn chat(h: &common::Harness) -> axum::response::Response {
+    h.send(post_to(
+        h,
+        "/v1/chat/completions",
+        json!({"model": "qwen", "stream": true}).to_string(),
+    ))
+    .await
+}
+
+#[tokio::test]
+async fn a_stream_arrives_event_by_event() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = release.clone();
+    let up = scripted_upstream("text/event-stream", move || {
+        scripted(
+            vec![
+                Step::Send("data: one\n\n"),
+                Step::Wait(gate.clone()),
+                Step::Send("data: two\n\n"),
+            ],
+            None,
+        )
+    })
+    .await;
+    let h = harness("[\"files\"]", &model_toml("qwen", "chat", &up.url, "")).await;
+    let response = chat(&h).await;
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let mut body = response.into_body();
+    let first = tokio::time::timeout(Duration::from_secs(2), body.frame())
+        .await
+        .expect("the first event must arrive before the stream ends")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.into_data().unwrap(), "data: one\n\n");
+    release.notify_one();
+    let rest = body.collect().await.unwrap().to_bytes();
+    assert_eq!(rest, "data: two\n\n");
+}
+
+#[tokio::test]
+async fn silent_streams_get_keep_alive_lines_between_events() {
+    let up = scripted_upstream("text/event-stream", || {
+        scripted(
+            vec![
+                Step::Send("data: one\n\n"),
+                Step::Sleep(300),
+                Step::Send("data: par"),
+                Step::Sleep(300),
+                Step::Send("tial\r\n\r\n"),
+                Step::Sleep(300),
+                Step::Send("data: end\n\n"),
+            ],
+            None,
+        )
+    })
+    .await;
+    let timing = Timing {
+        keep_alive: Duration::from_millis(50),
+        ..Timing::default()
+    };
+    let h = harness_timed(
+        "[\"files\"]",
+        &model_toml("qwen", "chat", &up.url, ""),
+        timing,
+    )
+    .await;
+    let (text, failed) = read_all(chat(&h).await).await;
+    assert!(!failed, "{text:?}");
+    assert!(
+        text.starts_with("data: one\n\n: keep-alive\n\n"),
+        "{text:?}"
+    );
+    assert!(text.contains("data: partial\r\n\r\n"), "{text:?}");
+    let between = &text[text.find("partial\r\n\r\n").unwrap()..text.find("data: end\n\n").unwrap()];
+    assert!(between.contains(": keep-alive\n\n"), "{text:?}");
+    assert!(text.ends_with("data: end\n\n"), "{text:?}");
+}
+
+#[tokio::test]
+async fn a_stuck_answer_is_cut() {
+    let timing = Timing {
+        silence: Duration::from_millis(100),
+        stream_silence: Duration::from_millis(300),
+        keep_alive: Duration::from_millis(50),
+        ..Timing::default()
+    };
+    let json_up = scripted_upstream("application/json", || {
+        scripted(vec![Step::Send("{\"a\":"), Step::Hang], None)
+    })
+    .await;
+    let h = harness_timed(
+        "[\"files\"]",
+        &model_toml("qwen", "chat", &json_up.url, ""),
+        timing.clone(),
+    )
+    .await;
+    let started = std::time::Instant::now();
+    let (text, failed) = read_all(chat(&h).await).await;
+    assert!(failed && started.elapsed() < Duration::from_secs(1));
+    assert_eq!(text, "{\"a\":");
+
+    let sse_up = scripted_upstream("text/event-stream", || {
+        scripted(vec![Step::Send("data: one\n\n"), Step::Hang], None)
+    })
+    .await;
+    let h = harness_timed(
+        "[\"files\"]",
+        &model_toml("qwen", "chat", &sse_up.url, ""),
+        timing,
+    )
+    .await;
+    let (text, failed) = read_all(chat(&h).await).await;
+    assert!(failed, "{text:?}");
+    assert!(text.matches(": keep-alive\n\n").count() >= 2, "{text:?}");
+}
+
+#[tokio::test]
+async fn hanging_up_ends_the_upstream_call() {
+    let dropped = Arc::new(tokio::sync::Notify::new());
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (guard_notify, counter) = (dropped.clone(), calls.clone());
+    let up = scripted_upstream("text/event-stream", move || {
+        if counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            scripted(
+                vec![Step::Send("data: one\n\n"), Step::Hang],
+                Some(Guard(guard_notify.clone())),
+            )
+        } else {
+            scripted(vec![Step::Send("data: done\n\n")], None)
+        }
+    })
+    .await;
+    let h = harness(
+        "[\"files\"]",
+        &format!(
+            "[limits]\nmax_model_requests = 1\n{}",
+            model_toml("qwen", "chat", &up.url, "")
+        ),
+    )
+    .await;
+    let mut body = chat(&h).await.into_body();
+    let first = body.frame().await.unwrap().unwrap();
+    assert_eq!(first.into_data().unwrap(), "data: one\n\n");
+    drop(body);
+    tokio::time::timeout(Duration::from_secs(1), dropped.notified())
+        .await
+        .expect("the upstream call must end when the client hangs up");
+    let (text, failed) = read_all(chat(&h).await).await;
+    assert_eq!((text.as_str(), failed), ("data: done\n\n", false));
+}
