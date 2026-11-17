@@ -912,7 +912,7 @@ async fn read_body(body: Body, limit: usize) -> Result<Option<Bytes>, axum::Erro
 
 /// Reads and discards a body before an early answer: the HTTP server would otherwise close a
 /// connection with a body in flight, and the client would see a reset instead of the answer.
-async fn drain(body: Body, limit: usize) {
+pub(crate) async fn drain(body: Body, limit: usize) {
     let mut stream = body.into_data_stream();
     let mut read = 0;
     while let Some(Ok(chunk)) = stream.next().await {

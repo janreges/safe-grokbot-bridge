@@ -89,7 +89,7 @@ pub struct FileContent {
     pub content: String,
 }
 
-fn denied(path: &Path) -> ApiError {
+pub(crate) fn denied(path: &Path) -> ApiError {
     ApiError::new(
         StatusCode::FORBIDDEN,
         "denied",
@@ -390,7 +390,7 @@ fn open_regular(path: &Path) -> std::io::Result<File> {
 /// file: someone who can write in the workspace could swap the file, or a folder above it, for a
 /// symlink between the check and the open. The open neither follows a final symlink nor blocks
 /// on a FIFO, and the handle must be a regular file.
-fn open_checked(path: &Path) -> Result<File, ApiError> {
+pub(crate) fn open_checked(path: &Path) -> Result<File, ApiError> {
     let file = open_regular(path).map_err(|err| match err.kind() {
         std::io::ErrorKind::PermissionDenied => {
             ApiError::forbidden(format!("`{}` cannot be read: {err}.", path.display()))

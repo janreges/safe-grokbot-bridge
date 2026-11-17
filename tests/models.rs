@@ -10,7 +10,7 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
-use common::{closed_port, harness, harness_timed, json_body, model_toml, upstream};
+use common::{closed_port, form, harness, harness_timed, json_body, model_toml, upstream};
 use http_body_util::BodyExt;
 use safe_grokbot_bridge::models::Timing;
 use serde_json::{Value, json};
@@ -883,31 +883,6 @@ async fn hanging_up_ends_the_upstream_call() {
 }
 
 /// A form part: name, optional file name and content type, content.
-type Part<'a> = (&'a str, Option<(&'a str, &'a str)>, &'a [u8]);
-
-/// A multipart body with boundary `XBOUND`.
-fn form(parts: &[Part]) -> Vec<u8> {
-    let mut body = Vec::new();
-    for (name, file, bytes) in parts {
-        body.extend_from_slice(b"--XBOUND\r\n");
-        match file {
-            Some((file_name, content_type)) => body.extend_from_slice(
-                format!(
-                    "Content-Disposition: form-data; name=\"{name}\"; filename=\"{file_name}\"\r\nContent-Type: {content_type}\r\n\r\n"
-                )
-                .as_bytes(),
-            ),
-            None => body.extend_from_slice(
-                format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
-            ),
-        }
-        body.extend_from_slice(bytes);
-        body.extend_from_slice(b"\r\n");
-    }
-    body.extend_from_slice(b"--XBOUND--\r\n");
-    body
-}
-
 #[tokio::test]
 async fn a_transcription_form_is_rebuilt_for_the_upstream() {
     let up = upstream(

@@ -26,6 +26,7 @@ use crate::models::{self, ModelInfo, ModelList};
 use crate::paths;
 use crate::server::AppState;
 use crate::sessions::{InputRequest, MAX_WAIT_SECS, Runner, Session, SessionList, StartRequest};
+use crate::transfer::{self, Uploaded};
 
 const MAX_BODY: usize = 1024 * 1024;
 
@@ -109,6 +110,12 @@ fn full_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(info))
         .routes(routes!(list_files))
         .routes(routes!(read_file))
+        .routes(routes!(download_file))
+        .merge(
+            OpenApiRouter::new()
+                .routes(routes!(upload_files))
+                .layer(DefaultBodyLimit::max(transfer::MAX_TRANSFER_BYTES as usize)),
+        )
         .routes(routes!(git_status))
         .routes(routes!(git_log))
         .routes(routes!(git_diff))
@@ -215,6 +222,13 @@ fn add_common_responses(openapi: &mut utoipa::openapi::OpenApi) {
         ];
         for operation in operations.into_iter().flatten() {
             let has_body = operation.request_body.is_some();
+            let json_body = operation
+                .request_body
+                .as_ref()
+                .is_some_and(|body| match body {
+                    RefOr::T(body) => body.content.contains_key("application/json"),
+                    RefOr::Ref(_) => true,
+                });
             let model_call = has_body
                 && operation
                     .tags
@@ -252,7 +266,7 @@ fn add_common_responses(openapi: &mut utoipa::openapi::OpenApi) {
                             .into()
                     });
                 }
-            } else if has_body {
+            } else if json_body {
                 for (status, description) in body_errors {
                     responses.entry(status.into()).or_insert_with(|| {
                         ResponseBuilder::new()
@@ -432,6 +446,8 @@ pub struct LimitsInfo {
     /// Model calls the bridge runs at the same time; further calls wait up to 10 seconds for a
     /// free slot, then get 429 `models_busy`.
     pub max_model_requests: usize,
+    /// Bytes per upload request and per downloaded file (96 MB).
+    pub max_transfer_bytes: u64,
 }
 
 /// Describes this machine: version, agents, the workspaces you may access and the limits.
@@ -481,6 +497,7 @@ async fn info(State(app): State<AppState>, Extension(caller): Extension<Caller>)
             max_sessions: config.limits.max_sessions,
             max_wait_secs: MAX_WAIT_SECS,
             max_model_requests: config.limits.max_model_requests,
+            max_transfer_bytes: transfer::MAX_TRANSFER_BYTES,
         },
     })
 }
@@ -571,6 +588,75 @@ async fn read_file(
     })
     .await
     .map(Json)
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct UploadQuery {
+    /// Absolute path of an existing folder inside a workspace that allows `upload`, such as a
+    /// session's `cwd`. It only selects the workspace: the files go to that workspace's incoming
+    /// folder, `<workspace>/.sgb-inbox/`, not into this folder.
+    pub dir: String,
+}
+
+/// One or more files, each a part with a file name.
+#[derive(ToSchema)]
+pub struct UploadForm {
+    /// Up to 20 files; the part name does not matter, `file` is usual.
+    #[schema(value_type = Vec<String>, format = Binary)]
+    pub file: Vec<Vec<u8>>,
+}
+
+/// Uploads files to this machine. They are stored in the incoming folder of `dir`'s workspace
+/// under names the bridge generates (`2026-11-19.14-32-53.k7q2.zip`), never replacing a file,
+/// and the response gives each file's absolute `path` to pass to an agent. Either every file is
+/// stored or none. At most 96 MB (96 000 000 bytes) per request and 20 files. Files stay until
+/// someone deletes them on the machine; no endpoint lists or deletes them.
+#[utoipa::path(post, path = "/v1/files/upload", tag = "files", params(UploadQuery),
+    request_body(content = inline(UploadForm), content_type = "multipart/form-data"),
+    responses(
+        (status = 201, description = "Every file was stored; `files` lists their paths in the order of the request", body = Uploaded),
+        (status = 400, description = "`invalid_request`: not a multipart form, no file, a part without a file name, more than 20 files, or the body broke off. Nothing was stored", body = ErrorBody),
+        (status = 403, description = "`dir` is outside the workspaces, or its workspace does not allow `upload`", body = ErrorBody),
+        (status = 404, description = "`dir` does not exist", body = ErrorBody),
+        (status = 409, description = "`inbox_unusable`: the incoming folder is a link, lies outside the workspace or cannot be created; only the machine's owner can fix it", body = ErrorBody),
+        (status = 413, description = "`too_large`: the request is larger than 96 MB. Nothing was stored", body = ErrorBody),
+        (status = 429, description = "`transfers_busy`: 4 uploads and downloads are running; wait `Retry-After` seconds", body = ErrorBody),
+        (status = 507, description = "`disk_full`: the machine has no space left. Nothing was stored", body = ErrorBody),
+    ))]
+async fn upload_files(
+    State(app): State<AppState>,
+    q: Result<Query<UploadQuery>, QueryRejection>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    transfer::upload(&app, query(q).map(|q| q.dir), request).await
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct DownloadQuery {
+    /// Absolute path of a regular file inside a workspace that allows `download`.
+    pub path: String,
+}
+
+/// Downloads a file of any kind, binary ones included, as raw bytes with `Content-Length` and
+/// the file's name in `Content-Disposition`. At most 96 MB (96 000 000 bytes). To read a text
+/// file line by line, use GET /v1/files/content instead.
+#[utoipa::path(get, path = "/v1/files/download", tag = "files", params(DownloadQuery),
+    responses(
+        (status = 200, description = "The file's bytes", content_type = "application/octet-stream"),
+        (status = 400, description = "Not an absolute path, a folder, or not a regular file", body = ErrorBody),
+        (status = 403, description = "Outside the workspaces, denied (`denied`: secrets such as `.env` files and keys are never served), or `download` not allowed", body = ErrorBody),
+        (status = 404, description = "The file does not exist", body = ErrorBody),
+        (status = 409, description = "`path_changed`: the file was replaced while it was being opened; try again", body = ErrorBody),
+        (status = 413, description = "`too_large`: the file is larger than 96 MB", body = ErrorBody),
+        (status = 429, description = "`transfers_busy`: 4 uploads and downloads are running; wait `Retry-After` seconds", body = ErrorBody),
+    ))]
+async fn download_file(
+    State(app): State<AppState>,
+    q: Result<Query<DownloadQuery>, QueryRejection>,
+) -> axum::response::Response {
+    transfer::download(&app, query(q).map(|q| q.path)).await
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -138,6 +138,31 @@ pub fn model_toml(name: &str, kind: &str, url: &str, extra: &str) -> String {
     format!("[models.{name}]\ntype = \"{kind}\"\nurl = \"{url}\"\n{extra}\n")
 }
 
+pub type Part<'a> = (&'a str, Option<(&'a str, &'a str)>, &'a [u8]);
+
+/// A multipart body with boundary `XBOUND`.
+pub fn form(parts: &[Part]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (name, file, bytes) in parts {
+        body.extend_from_slice(b"--XBOUND\r\n");
+        match file {
+            Some((file_name, content_type)) => body.extend_from_slice(
+                format!(
+                    "Content-Disposition: form-data; name=\"{name}\"; filename=\"{file_name}\"\r\nContent-Type: {content_type}\r\n\r\n"
+                )
+                .as_bytes(),
+            ),
+            None => body.extend_from_slice(
+                format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+            ),
+        }
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(b"--XBOUND--\r\n");
+    body
+}
+
 pub fn toml_str(path: &Path) -> String {
     toml::Value::String(path.display().to_string()).to_string()
 }

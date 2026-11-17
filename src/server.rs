@@ -41,6 +41,8 @@ pub struct App {
     pub auth: Auth,
     pub sessions: Arc<Sessions>,
     pub models: Models,
+    /// Uploads and downloads running at once.
+    pub transfers: Arc<Semaphore>,
     pub started_at: SystemTime,
 }
 
@@ -58,6 +60,7 @@ impl App {
             auth: Auth::new(&config),
             sessions: Arc::new(Sessions::new(config.clone()).await),
             models: Models::new(&config, timing)?,
+            transfers: crate::transfer::slots(),
             config,
             started_at: SystemTime::now(),
         }))

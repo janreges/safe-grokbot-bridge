@@ -406,6 +406,10 @@ pub enum Capability {
     Input,
     /// Start new agent sessions.
     Start,
+    /// Download any regular file, binary ones included.
+    Download,
+    /// Add files to the workspace's incoming folder, `.sgb-inbox`.
+    Upload,
 }
 
 impl std::fmt::Display for Capability {
@@ -416,6 +420,8 @@ impl std::fmt::Display for Capability {
             Capability::Sessions => "sessions",
             Capability::Input => "input",
             Capability::Start => "start",
+            Capability::Download => "download",
+            Capability::Upload => "upload",
         })
     }
 }
@@ -1024,6 +1030,25 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn transfer_capabilities_stand_alone_and_are_off_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = parse("allow = [\"upload\", \"download\"]\n", dir.path()).unwrap();
+        let ws = &cfg.workspaces[0];
+        assert!(ws.allows(Capability::Upload) && ws.allows(Capability::Download));
+        assert!(!ws.allows(Capability::Files));
+        assert_eq!(
+            (
+                Capability::Upload.to_string(),
+                Capability::Download.to_string()
+            ),
+            ("upload".to_string(), "download".to_string())
+        );
+        let cfg = parse("", dir.path()).unwrap();
+        let ws = &cfg.workspaces[0];
+        assert!(!ws.allows(Capability::Upload) && !ws.allows(Capability::Download));
     }
 
     #[test]

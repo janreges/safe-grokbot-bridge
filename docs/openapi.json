@@ -900,6 +900,276 @@
         }
       }
     },
+    "/v1/files/download": {
+      "get": {
+        "tags": [
+          "files"
+        ],
+        "summary": "Downloads a file of any kind, binary ones included, as raw bytes with `Content-Length` and\nthe file's name in `Content-Disposition`. At most 96 MB (96 000 000 bytes). To read a text\nfile line by line, use GET /v1/files/content instead.",
+        "operationId": "download_file",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Absolute path of a regular file inside a workspace that allows `download`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file's bytes",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "400": {
+            "description": "Not an absolute path, a folder, or not a regular file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Outside the workspaces, denied (`denied`: secrets such as `.env` files and keys are never served), or `download` not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The file does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`path_changed`: the file was replaced while it was being opened; try again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`too_large`: the file is larger than 96 MB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`transfers_busy`: 4 uploads and downloads are running; wait `Retry-After` seconds, or the rate limit or an authentication lockout (wait `Retry-After` seconds)",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/files/upload": {
+      "post": {
+        "tags": [
+          "files"
+        ],
+        "summary": "Uploads files to this machine. They are stored in the incoming folder of `dir`'s workspace\nunder names the bridge generates (`2026-11-19.14-32-53.k7q2.zip`), never replacing a file,\nand the response gives each file's absolute `path` to pass to an agent. Either every file is\nstored or none. At most 96 MB (96 000 000 bytes) per request and 20 files. Files stay until\nsomeone deletes them on the machine; no endpoint lists or deletes them.",
+        "operationId": "upload_files",
+        "parameters": [
+          {
+            "name": "dir",
+            "in": "query",
+            "description": "Absolute path of an existing folder inside a workspace that allows `upload`, such as a\nsession's `cwd`. It only selects the workspace: the files go to that workspace's incoming\nfolder, `<workspace>/.sgb-inbox/`, not into this folder.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "description": "One or more files, each a part with a file name.",
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    },
+                    "description": "Up to 20 files; the part name does not matter, `file` is usual."
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Every file was stored; `files` lists their paths in the order of the request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Uploaded"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_request`: not a multipart form, no file, a part without a file name, more than 20 files, or the body broke off. Nothing was stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`dir` is outside the workspaces, or its workspace does not allow `upload`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`dir` does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`inbox_unusable`: the incoming folder is a link, lies outside the workspace or cannot be created; only the machine's owner can fix it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`too_large`: the request is larger than 96 MB. Nothing was stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`transfers_busy`: 4 uploads and downloads are running; wait `Retry-After` seconds, or the rate limit or an authentication lockout (wait `Retry-After` seconds)",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "`disk_full`: the machine has no space left. Nothing was stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/git/diff": {
       "get": {
         "tags": [
@@ -2623,7 +2893,9 @@
           "git",
           "sessions",
           "input",
-          "start"
+          "start",
+          "download",
+          "upload"
         ]
       },
       "Effort": {
@@ -2971,7 +3243,8 @@
           "requests_per_minute",
           "max_sessions",
           "max_wait_secs",
-          "max_model_requests"
+          "max_model_requests",
+          "max_transfer_bytes"
         ],
         "properties": {
           "max_model_requests": {
@@ -2982,6 +3255,12 @@
           "max_sessions": {
             "type": "integer",
             "description": "Sessions started by the bridge that may run at the same time.",
+            "minimum": 0
+          },
+          "max_transfer_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes per upload request and per downloaded file (96 MB).",
             "minimum": 0
           },
           "max_wait_secs": {
@@ -3361,6 +3640,30 @@
         },
         "additionalProperties": false
       },
+      "StoredFile": {
+        "type": "object",
+        "required": [
+          "name",
+          "path",
+          "size"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The file name as you sent it, for your own bookkeeping; it is not used on the machine."
+          },
+          "path": {
+            "type": "string",
+            "description": "Absolute path of the stored file. Give it to an agent working on this machine."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Size in bytes.",
+            "minimum": 0
+          }
+        }
+      },
       "TmuxInfo": {
         "type": "object",
         "required": [
@@ -3376,6 +3679,32 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "Uploaded": {
+        "type": "object",
+        "description": "The files an upload stored.",
+        "required": [
+          "files",
+          "inbox",
+          "note"
+        ],
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StoredFile"
+            },
+            "description": "One entry per uploaded file, in the order of the request."
+          },
+          "inbox": {
+            "type": "string",
+            "description": "The workspace's incoming folder, where every upload of this workspace goes."
+          },
+          "note": {
+            "type": "string",
+            "description": "What to do with the files, and that they stay until someone deletes them."
           }
         }
       },
