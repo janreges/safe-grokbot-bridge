@@ -486,11 +486,12 @@ pub fn send(state_dir: &Path, new: NewMessage, now: SystemTime) -> Result<Messag
 }
 
 /// Messages in `state` (all states when `None`) and, if `to` is given, addressed to that bot or to
-/// nobody. Newest first; at most `limit` of them, without bodies.
+/// nobody. Newest first; one page of at most `limit` of them from `offset`, without bodies.
 pub fn list(
     state_dir: &Path,
     state: Option<State>,
     to: Option<&str>,
+    offset: usize,
     limit: usize,
 ) -> Result<Listing, Error> {
     let entries = match fs::read_dir(dir(state_dir)) {
@@ -536,11 +537,8 @@ pub fn list(
     }
     found.sort_by(|a, b| b.created.cmp(&a.created).then_with(|| b.id.cmp(&a.id)));
     let total = found.len();
-    found.truncate(limit);
-    Ok(Listing {
-        messages: found,
-        total,
-    })
+    let messages = found.into_iter().skip(offset).take(limit).collect();
+    Ok(Listing { messages, total })
 }
 
 /// One message with its body.
@@ -815,7 +813,7 @@ mod tests {
         assert!(refused(huge));
 
         assert!(
-            list(&state, None, None, LIST_MAX)
+            list(&state, None, None, 0, LIST_MAX)
                 .unwrap()
                 .messages
                 .is_empty()
@@ -864,7 +862,7 @@ mod tests {
         }];
         assert!(matches!(send(&state, new, at(0)), Err(Error::Invalid(_))));
         assert!(
-            list(&state, None, None, LIST_MAX)
+            list(&state, None, None, 0, LIST_MAX)
                 .unwrap()
                 .messages
                 .is_empty()
@@ -886,7 +884,7 @@ mod tests {
         let (_dir, state) = state();
         send(&state, message("real"), at(0)).unwrap();
         std::fs::create_dir_all(dir(&state).join("2026-11-17.16-40-12.zzzz")).unwrap();
-        let listing = list(&state, None, None, LIST_MAX).unwrap();
+        let listing = list(&state, None, None, 0, LIST_MAX).unwrap();
         assert_eq!(listing.total, 1);
         assert_eq!(listing.messages[0].subject, "real");
     }
@@ -1009,7 +1007,7 @@ mod tests {
         send(&state, addressed, at(7)).unwrap();
 
         let subjects = |which: Option<State>, to: Option<&str>| -> Vec<String> {
-            list(&state, which, to, LIST_MAX)
+            list(&state, which, to, 0, LIST_MAX)
                 .unwrap()
                 .messages
                 .into_iter()
@@ -1027,13 +1025,28 @@ mod tests {
         );
         assert!(!subjects(None, Some("Homelab")).contains(&"for Adam".to_string()));
         assert!(subjects(None, Some("Adam")).contains(&"for Adam".to_string()));
-        let page = list(&state, None, None, 2).unwrap();
+        let page = list(&state, None, None, 0, 2).unwrap();
         assert_eq!((page.total, page.messages.len()), (4, 2));
         assert!(page.messages.iter().all(|m| m.body.is_none()));
         assert_eq!(
             get(&state, &taken.id).unwrap().body.as_deref(),
             Some("Body in *Markdown*.\n")
         );
+    }
+
+    #[test]
+    fn a_listing_pages_through_every_message() {
+        let (_dir, state) = state();
+        for index in 1..=5u64 {
+            send(&state, message(&format!("m{index}")), at(index)).unwrap();
+        }
+        // Newest first: m5, m4, m3, m2, m1.
+        let second = list(&state, None, None, 2, 2).unwrap();
+        let subjects: Vec<_> = second.messages.iter().map(|m| m.subject.as_str()).collect();
+        assert_eq!((second.total, subjects), (5, vec!["m3", "m2"]));
+        let last = list(&state, None, None, 4, 2).unwrap();
+        assert_eq!(last.messages.len(), 1);
+        assert!(list(&state, None, None, 9, 2).unwrap().messages.is_empty());
     }
 
     #[test]

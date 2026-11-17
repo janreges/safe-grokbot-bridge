@@ -680,6 +680,9 @@ pub struct InboxQuery {
     pub to: Option<String>,
     /// Messages to return, 1–200 (default 50). The newest come first.
     pub limit: Option<usize>,
+    /// Newer messages to skip, for the next page: 0 (the default) for the first page, then the
+    /// offset that the `note` of the previous page names.
+    pub offset: Option<usize>,
 }
 
 /// A page of the inbox. Bodies are left out: read a message with GET /v1/inbox/{id} before you
@@ -690,7 +693,8 @@ pub struct InboxList {
     pub messages: Vec<inbox::Message>,
     /// How many messages match the filter in all.
     pub total: usize,
-    /// True when `messages` holds fewer messages than `total`.
+    /// True when more matching messages follow this page. The `note` then names the `offset` of
+    /// the next page.
     pub truncated: bool,
     /// What to do next when the list is empty or cut short. Absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -739,14 +743,16 @@ async fn list_inbox(
             inbox::LIST_MAX
         )));
     }
+    let offset = q.offset.unwrap_or(0);
     let state_dir = app.config.server.state_dir.clone();
     let to = q.to;
     let listing = blocking(move || {
-        inbox::list(&state_dir, state, to.as_deref(), limit).map_err(ApiError::from)
+        inbox::list(&state_dir, state, to.as_deref(), offset, limit).map_err(ApiError::from)
     })
     .await?;
     let shown = listing.messages.len();
-    let truncated = listing.total > shown;
+    let next = offset + shown;
+    let truncated = listing.total > next;
     let note = if listing.total == 0 {
         Some(
             "No message matches this filter. Nothing is waiting for this bot under these \
@@ -756,10 +762,18 @@ async fn list_inbox(
         )
     } else if truncated {
         Some(format!(
-            "Showing the newest {shown} of {} messages. Pass a larger `limit` (up to {}), or \
-             narrow with `state` or `to`, to see the rest.",
+            "Showing messages {} to {} of {}, newest first. Pass `offset={next}` for the next \
+             page, or a larger `limit` (up to {}), or narrow with `state` or `to`.",
+            offset + 1,
+            next,
             listing.total,
             inbox::LIST_MAX
+        ))
+    } else if shown == 0 {
+        Some(format!(
+            "No message at offset {offset}: this filter matches {} messages in all. Use an \
+             offset below {}.",
+            listing.total, listing.total
         ))
     } else {
         None

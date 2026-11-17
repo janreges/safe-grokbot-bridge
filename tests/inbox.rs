@@ -219,11 +219,21 @@ async fn a_listing_says_when_it_is_cut_short_and_what_to_do_next() {
         (page["total"].as_u64(), page["truncated"].as_bool()),
         (Some(3), Some(true))
     );
+    assert!(page["note"].as_str().unwrap().contains("offset=2"));
+    // The note names the next offset, and the next page holds the oldest message.
+    let (_, next) = h.get("/v1/inbox?limit=2&offset=2").await;
+    assert_eq!(next["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(next["messages"][0]["subject"], "one");
+    assert_eq!(next["truncated"].as_bool(), Some(false));
+    assert!(next["note"].is_null());
+    // Past the last message the page is empty, and it says so.
+    let (_, past) = h.get("/v1/inbox?limit=2&offset=9").await;
+    assert!(past["messages"].as_array().unwrap().is_empty());
     assert!(
-        page["note"]
+        past["note"]
             .as_str()
             .unwrap()
-            .contains("Showing the newest 2 of 3")
+            .contains("No message at offset 9")
     );
 
     assert_eq!(h.get("/v1/inbox?limit=0").await.0, StatusCode::BAD_REQUEST);
