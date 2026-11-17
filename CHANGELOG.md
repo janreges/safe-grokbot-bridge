@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-17
+
 ### Added
 
 - Models behind the bridge. `[models.<name>]` tables in the config name chat, vision,
@@ -29,7 +31,6 @@ All notable changes to this project are documented in this file. The format is b
 - `check` asks every model's upstream whether it is reachable, accepts the key and knows the
   model. It warns when the config file lies inside a workspace, or holds API keys and is
   readable by other users. `init` writes commented model examples.
-
 - File transfer in both directions, with two new workspace capabilities that are off by
   default. With `upload`, `POST /v1/files/upload?dir=` stores the files of a multipart form in
   the workspace's incoming folder, `.sgb-inbox`, under generated names such as
@@ -186,7 +187,8 @@ All notable changes to this project are documented in this file. The format is b
 - Release archives for Linux (x86_64, aarch64), macOS (Apple silicon, Intel) and Windows, with
   SHA-256 checksums.
 
-[Unreleased]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/janreges/safe-grokbot-bridge/compare/v0.1.0...v0.1.1
