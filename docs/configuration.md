@@ -262,6 +262,30 @@ linked worktree (`git worktree add`) needs its main repository exposed, and a re
 | `sessions` | listing sessions and reading their state, answers and screen |
 | `input` | sending text and keys; stopping sessions the bridge started |
 | `start` | starting new sessions |
+| `download` | `GET /v1/files/download`: files of any kind, binary ones included, up to 96 MB |
+| `upload` | `POST /v1/files/upload`: adding files to the workspace's incoming folder |
+
+### The incoming folder
+
+Uploads go to `<workspace>/.sgb-inbox/`, never anywhere else, under names the bridge generates
+(`2026-11-19.14-32-53.k7q2.zip`), and never replace a file. The response tells the client each
+file's path, which it passes to an agent. The bridge creates the folder on the first upload (mode
+`0700` on Unix) and puts a `.gitignore` with `*` into it, so git never offers uploads for a
+commit. For uploads next to one project, add a workspace for that project: the most specific
+workspace of the client's `dir` decides. A workspace at `/` takes no uploads.
+
+The bridge never deletes uploads and has no quota: agents or you remove what is no longer
+needed. `check` warns when the folder is a link, is not writable, or can be written by others.
+
+> **Where not to allow `upload`.** Never in a folder that a web server publishes, or that a tool
+> scans for files to run (plugin, start-up or drop-in folders). On Windows, and on mounts
+> without file modes (a Windows drive inside WSL, exFAT, SMB), a file's extension decides what
+> opening it does, and the client chooses the extension; there the protection is only the
+> dedicated folder and the generated name.
+
+`download` is separate from `files` on purpose: `files` reads only text, so binary data in a
+broad workspace, such as a browser's cookie database, stays out of reach unless you allow
+`download`. Deny patterns apply to downloads as well.
 
 ### Deny patterns
 
@@ -284,6 +308,14 @@ Deny patterns do not filter git history. Anything that was ever committed is vis
 git endpoints, and agents started in a folder can read what they are allowed to read.
 
 ## Examples
+
+**Passing files between the bot and the agents in one project:**
+
+```toml
+[[workspaces]]
+path = "/home/me/projects/app"
+allow = ["files", "git", "sessions", "input", "start", "download", "upload"]
+```
 
 **A dedicated agent VM where any folder is fine:**
 

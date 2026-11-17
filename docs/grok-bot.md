@@ -108,6 +108,20 @@ vectors = client.embeddings.create(model="embed", input=["hello", "world"])
   folders, git or agents. Test a new key with one call first: ten failed authentications block
   the bot's address for 15 minutes.
 
+## Passing files
+
+Where the machine's owner allows `upload` and `download` for a folder, the bot and the agents
+pass files to each other, up to 96 MB per request:
+
+- **To the machine:** the bot uploads files with `POST /v1/files/upload?dir=<folder>`. They land
+  in the workspace's incoming folder, `.sgb-inbox/`, under generated names, and the answer gives
+  each file's path, which the bot puts into its message to an agent.
+- **From the machine:** the agent tells the bot the path of a file it made, and the bot
+  downloads it with `GET /v1/files/download?path=<file>`.
+
+The client skill has `curl` helpers for both. Uploads stay until someone deletes them on the
+machine.
+
 ## Tips
 
 - Name your tmux-started sessions' folders well: session ids are built from the folder name and

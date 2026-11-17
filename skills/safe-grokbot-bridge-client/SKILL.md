@@ -1,6 +1,6 @@
 ---
 name: safe-grokbot-bridge-client
-description: Work with my computers through safe-grokbot-bridge, and connect new ones. Read project folders and git history there, see which Claude Code, Codex and Hermes sessions are running, give them tasks and follow-ups, answer their prompts, and start new sessions. Call the models configured there (local LLMs, vision, embeddings, rerankers, speech and image models, paid APIs) with curl or from programs you write, through the OpenAI and Anthropic client libraries. Also connect a new machine by creating its Cloudflare Tunnel and writing the message for the machine's coding agent. Use it whenever a task involves code, repositories, coding agents or models on my machines, or when I want to connect a machine.
+description: Work with my computers through safe-grokbot-bridge, and connect new ones. Read project folders and git history there, see which Claude Code, Codex and Hermes sessions are running, give them tasks and follow-ups, answer their prompts, and start new sessions. Call the models configured there (local LLMs, vision, embeddings, rerankers, speech and image models, paid APIs) with curl or from programs you write, through the OpenAI and Anthropic client libraries. Pass files both ways: upload files for the agents there and download files they made. Also connect a new machine by creating its Cloudflare Tunnel and writing the message for the machine's coding agent. Use it whenever a task involves code, repositories, coding agents or models on my machines, or when I want to connect a machine.
 ---
 
 # safe-grokbot-bridge client
@@ -8,7 +8,7 @@ description: Work with my computers through safe-grokbot-bridge, and connect new
 Each of my machines runs a bridge with an HTTP API. You cannot run commands on my machines
 yourself. You can read the folders I allowed, and you can work through coding agents (Claude
 Code, Codex, Hermes) that run there. You can also call the models I configured on a machine
-(section Models). You need `bash` and `curl`.
+(section Models), and pass files to and from them (section Files). You need `bash` and `curl`.
 
 ## Machines
 
@@ -55,7 +55,8 @@ sgb pc1 POST /v1/sessions /tmp/start.json
 ## Workflow
 
 1. `GET /v1/info` lists the workspaces I allowed, what each one allows (`files`, `git`,
-   `sessions`, `input`, `start`) and which agents exist. All paths are absolute.
+   `sessions`, `input`, `start`, `download`, `upload`) and which agents exist. All paths are
+   absolute.
 2. Before you start work in a folder, check `GET /v1/sessions?path=<folder>`. If an agent is
    already working there, do not start a second one in parallel. Continue an idle one, or ask me.
 3. Look around if useful: `GET /v1/files?path=…`, `GET /v1/files/content?path=…`,
@@ -107,7 +108,7 @@ sgbf() { # sgbf <machine> <path> -F … (a multipart form)
   local url="SGB_${m}_URL" tok="SGB_${m}_TOKEN" pin="SGB_${m}_PIN" p="$2"; shift 2
   local aid="SGB_${m}_ACCESS_ID" asec="SGB_${m}_ACCESS_SECRET" tls=()
   [ -n "${!pin}" ] && tls=(-k --pinnedpubkey "${!pin}")
-  curl -sS --max-time 120 "${tls[@]}" \
+  curl -sS --max-time 600 "${tls[@]}" \
        -H @<(printf 'Authorization: Bearer %s\n' "${!tok}"
              [ -n "${!aid}" ] && printf 'CF-Access-Client-Id: %s\nCF-Access-Client-Secret: %s\n' "${!aid}" "${!asec}") \
        "${!url}$p" "$@"
@@ -136,6 +137,39 @@ client = OpenAI(base_url=os.environ["SGB_PC1_URL"] + "/v1", api_key=os.environ["
 - For a program that runs on its own, ask me for a separate token with `models_only = true`: it
   can call models and nothing else. Test a new token with one call: ten failed logins block your
   address for 15 minutes.
+
+## Files
+
+Where a workspace allows `upload`, you can give the agents there files; where it allows
+`download`, you can fetch files of any kind from it. Both take at most 96 MB per request. The
+helpers use `sgbf` from above and curl 7.87 or newer:
+
+```bash
+sgbup() { # sgbup <machine> <folder> <local-file>…   up to 20 files
+  local m="$1" dir="$2" args=(); shift 2
+  for f in "$@"; do args+=(-F "file=@$f"); done
+  sgbf "$m" /v1/files/upload --url-query "dir=$dir" "${args[@]}"
+}
+sgbdl() { # sgbdl <machine> <file-on-machine> <local-file>
+  local code; code=$(sgbf "$1" /v1/files/download --url-query "path=$2" -o "$3" -w '%{http_code}')
+  [ "$code" = 200 ] || { cat "$3"; echo; rm -f "$3"; return 1; }
+}
+sgbup pc1 /home/me/projects/app /tmp/data.csv /tmp/logo.png
+sgbdl pc1 /home/me/projects/app/dist/report.pdf /tmp/report.pdf
+```
+
+- **Uploads** land in the workspace's incoming folder, `<workspace>/.sgb-inbox/`, not in the
+  folder you name; the folder only selects the workspace. The bridge names each file itself
+  (`2026-11-19.14-32-53.k7q2.csv`) and never replaces one. The answer lists each file's `path`:
+  put that path into your message to the agent, for example "Read the data in
+  /home/me/projects/app/.sgb-inbox/2026-11-19.14-32-53.k7q2.csv and …". Either all files of a
+  request are stored or none.
+- **If an upload's answer is lost** (a timeout, a dropped connection), upload again. The first
+  copy may exist under another name, which is harmless.
+- **Downloads:** ask the agent to save what you should fetch inside the workspace and to tell you
+  its absolute path. For a folder or a file over 96 MB, ask it to pack or split it first.
+- Uploads stay on my machine until someone deletes them. Do not upload secrets you were not
+  asked to pass on.
 
 ## Rules
 
@@ -178,7 +212,7 @@ client = OpenAI(base_url=os.environ["SGB_PC1_URL"] + "/v1", api_key=os.environ["
   - `409 busy`: a turn is still running. Wait first.
   - `409 path_changed`: a file changed while it was read (retry once), or the folder of a
     headless session was replaced (start a new session).
-  - `429`: wait `Retry-After` seconds.
+  - `429`: wait `Retry-After` seconds (`transfers_busy`: four uploads and downloads are running).
   - `503`, `agent_exited`, `tmux_failed`, `delivery_failed`: tell me; retrying the same call will
     not help.
   - Models: `404 model_not_found` and `400 wrong_model_type` name the models and the endpoint
@@ -187,11 +221,13 @@ client = OpenAI(base_url=os.environ["SGB_PC1_URL"] + "/v1", api_key=os.environ["
     `upstream_misconfigured`: the model's server or its config on my machine is wrong, tell me and
     do not retry; `504 upstream_timeout`: use `stream: true`. Other errors come from the model's
     server in its own shape (a `400` for a bad parameter, its own `429`).
+  - Files: `413 too_large`: ask an agent to compress or split the file; `409 inbox_unusable`
+    and `507 disk_full`: tell me, retrying will not help.
 - **Incomplete lists:** if a session list has `warnings`, some sources failed. Do not conclude that
   nothing is running.
 - **No secrets in chat:** never print, echo or write tokens into chat or files.
-- **Changes go through agents:** the file and git endpoints are read-only. Changes are made by
-  agent sessions.
+- **Changes go through agents:** apart from uploads into the incoming folder, the file and git
+  endpoints are read-only. Changes are made by agent sessions.
 - **Models cost money or GPU time.** Paid models are billed to me, and a local GPU serves one job
   at a time. Use the smallest model that does the job, and ask me before a large batch on a paid
   model.

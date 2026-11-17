@@ -19,7 +19,9 @@ narrow, authenticated HTTP API so that a remote agent can:
 4. start a new session in an allowed folder, in tmux (a live terminal the human can attach to)
    or headless (one non-interactive turn per message), and stop it;
 5. call the models configured on the machine: local LLMs, embedding, reranking, speech and
-   image models on vLLM or similar servers, and paid frontier APIs through the owner's keys.
+   image models on vLLM or similar servers, and paid frontier APIs through the owner's keys;
+6. pass files both ways: upload files into a workspace's incoming folder, and download files of
+   any kind (§10).
 
 The bridge never executes arbitrary commands on behalf of the client. All work on the machine is
 done by the coding agents, under their own permission systems, and the bridge decides which agent
@@ -33,11 +35,12 @@ authenticates the client, so it becomes the one door to the models as well (§9)
 
 ### Non-goals (v0.1)
 
-- No shell, file-write or file-upload endpoint. Changes happen through agents.
+- No shell and no generic file-write endpoint. An upload only adds new files, under names the
+  bridge generates, to a workspace's incoming folder (§10). Other changes happen through agents.
 - No MCP endpoint. Grok Bot reaches HTTP APIs through `curl` on its cloud computer, and other
   clients can use the same REST API.
 - No outbound notifications. Clients long-poll a session instead. A webhook to Grok routines
-  (`https://api2.cursor.sh/automations/webhook/<id>`) is planned (§14).
+  (`https://api2.cursor.sh/automations/webhook/<id>`) is planned (§15).
 - No multi-machine federation. Each machine runs its own bridge, and the client keeps a list.
 - No generic HTTP proxy. A client names a model, never a URL, and reaches only the upstream paths
   of a fixed table (§9).
@@ -83,6 +86,7 @@ Grok Bot cloud computer ── curl, HTTPS :443, Bearer token ──► Cloudfla
                                                            │      ├─ headless ─► claude -p / codex exec / hermes chat -Q
                                                            │      └─ external (experimental) ─► running sessions outside tmux
                                                            ├─ read-only files and git in allowed folders
+                                                           ├─ uploads into a workspace's .sgb-inbox/, downloads
                                                            └─ model calls ─► configured upstreams (vLLM, paid APIs)
 ```
 
@@ -121,6 +125,8 @@ OpenAPI 3.1 document generated from the code. The module tree is flat; see the l
 - **Model calls** are the only outbound requests. They go to the upstream URLs in the config,
   through one shared HTTP client (reqwest on rustls with `ring`, like the server), which ignores
   proxy variables from the environment and never follows a redirect (§9).
+- **Writes:** outside its state directory, the running bridge writes only uploads, into a
+  workspace's incoming folder (§10).
 
 State directory: `[server] state_dir`, defaulting to the platform data dir
 (`~/.local/share/safe-grokbot-bridge` on Linux,
@@ -240,9 +246,13 @@ contains it. Nested workspaces can therefore narrow or widen access.
 | `sessions` | list sessions and read their output |
 | `input` | send text or keys to sessions, stop sessions the bridge started |
 | `start` | start new sessions |
+| `download` | download any regular file, binary ones included |
+| `upload` | add files to the workspace's incoming folder, `.sgb-inbox/` |
 
 The default is `["files", "git", "sessions"]`, which is read-only. Controlling agents is an
-explicit opt-in.
+explicit opt-in, and so are `download` and `upload`. `files` alone still reads only text, so
+binary data in a broadly configured workspace (a browser's cookie database, say) stays out of
+reach unless `download` is allowed.
 
 **Deny patterns** hide secrets from `files` endpoints, both in listings and in reads. Defaults:
 `.git`, `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.kdbx`, `id_rsa*`, `id_ecdsa*`,
@@ -305,6 +315,10 @@ key.
 | The bridge token reaches an upstream | the client's `Authorization` and `x-api-key` headers are never forwarded |
 | A runaway program burns money or the GPU | per-token rate limit; `max_model_requests`; `tokens` on paid models; failed calls are marked as not worth retrying (`x-should-retry: false`) |
 | A program's key is stolen | `models_only` tokens cannot reach folders, git or agents |
+| An upload runs by itself, or replaces a file | uploads go only to `<workspace>/.sgb-inbox/`; the bridge generates the name and the client controls nothing but a sanitized extension; files are created exclusively and, where the file system has modes, with `0600` |
+| An upload is redirected through a link | the incoming folder is refused when it is a symlink or resolves outside the workspace root; files and the `.gitignore` are created exclusively, which does not follow a link at the final name |
+| Binary data read from a broad workspace | `download` is a separate capability, off by default; deny patterns and the checked file handle apply |
+| A full disk | 96 MB per request, 20 files per upload, 4 transfers at once; there is no quota |
 | Path traversal / symlink escape | canonicalize then prefix-check against canonical workspace roots; a file is opened without following a final symlink or blocking on a FIFO, and the open handle must still be the authorized file (Linux: the handle's own path; elsewhere: the path resolved again and compared with the handle), so swapping a file or folder during a request is refused |
 | Secret files exfiltrated via file API | default deny patterns plus user patterns |
 | Argument injection into git / agents / tmux | argv only, no shell; `--end-of-options` for git revisions; strict validation of revisions, model names, key names; prompts go through stdin or as the final argument after the options; messages for `codex queue` are one `--message=…` argument; the tmux start directory is escaped for tmux's format language (`#(…)` there would run a command) and arguments ending in `;` are escaped |
@@ -315,7 +329,7 @@ key.
 | Reading conversations from other folders | `resume` requires the conversation to have been held in the requested `cwd`: the first `cwd` of the Claude transcript (not its lossy project folder name), the Codex rollout's `cwd`, the Hermes session record; Hermes is pinned to `cwd` with `--in`. External sessions show transcripts and take messages only when their conversation began in their current folder (a Claude conversation resumed or moved there with `/cd` does not), and a running Codex that resumed a conversation from another folder is not matched to it. A compressed Hermes conversation, which Hermes would resume in a newer session, is refused |
 | Unwanted permission bypass | `bypass_permissions` needs a per-workspace opt-in; a Hermes conversation saved in YOLO mode, which Hermes restores on resume, can only be resumed with `bypass_permissions` |
 | Slow-loris / connection exhaustion on a public TLS port | HTTP/1.1 only; per-connection task with a 10 s TLS handshake timeout; first request within 15 s; idle connections closed after 150 s; header read timeout; at most 512 connections, 32 per client address, where an IPv6 client's /64 network counts as one address; `/healthz` answers and rejected requests close their connection |
-| Memory exhaustion | file reads only of regular files, capped while reading, at most 8 file operations at once; listings read `.gitignore` files themselves, through a handle that must be a regular file, read up to 1 MiB, never following a final link or blocking on a pipe; agent output read line by line with caps; request bodies capped at 1 MiB, except model calls (32 MiB for JSON, 96 MB for a transcription form), whose bodies are read only after one of the `max_model_requests` slots is taken |
+| Memory exhaustion | file reads only of regular files, capped while reading, at most 8 file operations at once; listings read `.gitignore` files themselves, through a handle that must be a regular file, read up to 1 MiB, never following a final link or blocking on a pipe; agent output read line by line with caps; request bodies capped at 1 MiB, except model calls (32 MiB for JSON, 96 MB for a transcription form), whose bodies are read only after one of the `max_model_requests` slots is taken; uploads and downloads are streamed, at most 4 at once, and a malformed upload form is held in memory at most up to the 96 MB limit |
 | Log flooding by unauthenticated clients | rejected requests are logged with a shortened method and path, requests from a blocked address are not logged one by one, and dropped connections are logged at most once a minute with their count |
 
 **Command lines are visible locally.** The first prompt of a tmux session is passed on the
@@ -344,6 +358,18 @@ This protects the keys from tokens that may only read, and from `models_only` to
 not protect them from a token that may start or drive agents: an agent runs as the bridge's user
 and can read what that user can. Such a token is worth as much as an SSH key, and with models
 configured it is also worth money at the paid providers behind them.
+
+**Limits of the upload protection,** stated rather than hidden:
+
+- Whoever can write in the workspace is not an adversary here. An agent working there could
+  swap the incoming folder for a link between the bridge's check and its write. It gains nothing
+  by that: it runs as the same user and can write the same file anywhere itself. The check for a
+  link guards against accidents and stale set-ups.
+- File modes exist only on Unix file systems. On Windows, and on mounts without modes (a Windows
+  drive inside WSL, exFAT, SMB), a file's extension decides what opening it does, and the client
+  chooses the extension. The protection there is the dedicated folder and the generated name.
+- A program that runs files by extension must not look into the incoming folder. Owners do not
+  allow `upload` in a folder that a web server publishes or that a tool scans for files to run.
 
 **Out of scope:** a compromised client (the Grok Bot account and its cloud computer), and
 malicious agents or prompt injection inside repositories. Agents keep their own permission
@@ -380,6 +406,8 @@ the file and git endpoints.
 | `GET /v1/sessions/{id}?lines=&wait=` | sessions | session state and output; `wait` long-polls up to 90 s while it works |
 | `POST /v1/sessions/{id}/input` | input | send text (`submit` presses Enter) or keys |
 | `DELETE /v1/sessions/{id}` | input | stop a session the bridge started |
+| `GET /v1/files/download?path=` | download | download a file of any kind, up to 96 MB (§10.2) |
+| `POST /v1/files/upload?dir=` | upload | store files in the workspace's incoming folder (§10.1) |
 | `GET /v1/models?type=` | any token | the models this token may call (§9.2) |
 | `POST /v1/chat/completions` | model's `tokens` | `chat` and `vision` models with `api = "openai"` |
 | `POST /v1/messages` | model's `tokens` | `chat` and `vision` models with `api = "anthropic"` |
@@ -394,7 +422,7 @@ A `models_only` token reaches the model endpoints and `GET /openapi.json`; every
 
 Errors use one shape: `{"error": {"code": "<stable_code>", "message": "<what happened and what to
 do>"}}`, returned with statuses 400, 401, 403, 404, 409, 413, 415, 429 (with `Retry-After`), 500,
-502, 503 or 504. Model calls also pass the upstream's own errors through in the upstream's shape
+502, 503, 504 or 507. Model calls also pass the upstream's own errors through in the upstream's shape
 (§9.1).
 
 Results never pretend to be complete. Truncated output says so (`truncated: true` plus a way to
@@ -735,7 +763,72 @@ needs `stream: true`; calls without a stream mode (embeddings, rerank, images, a
 without streaming) cannot take longer through the bridge. A cut answer ends with an aborted
 connection, so a client never takes it for a complete one.
 
-## 10. CLI
+## 10. File transfer
+
+Grok Bot and the agents make files as part of their work: archives, reports, images, data sets.
+The bot uploads files to a machine and downloads files from it. The agents never call the
+bridge: they read an uploaded file from the path the bot gives them, and tell the bot the path
+of a file they made. Code: `src/transfer.rs`.
+
+### 10.1 Upload
+
+`POST /v1/files/upload?dir=<folder>` with a multipart form, one part per file
+(`curl -F 'file=@report.pdf'`). `dir` is an existing folder in a workspace that allows `upload`,
+typically a session's `cwd`. It only selects the workspace: the files go to that workspace's
+incoming folder, `<workspace>/.sgb-inbox/`, never into `dir` itself.
+
+- **Names** are generated: `<date>.<time>.<random>.<extension>` in UTC, for example
+  `2026-11-19.14-32-53.k7q2.zip`, with four random characters from `a-z0-9`. The extension is
+  the uploaded name's last dot-separated part, lowercased, when it is 1 to 10 ASCII letters or
+  digits (`tar.gz` keeps both parts); anything else gives `bin`. Nothing else of the client's
+  file name reaches the file system; the response returns it as `name`.
+- **No file is ever replaced.** Each file is created under its final name with exclusive
+  creation (mode `0600` on Unix), and a taken name draws another random part. There are no
+  temporary names and no renames, because a rename replaces an existing file.
+- **The incoming folder** is created by the first upload (mode `0700` on Unix) and gets a
+  `.gitignore` with `*` whenever it has none, so git never offers uploads for a commit and the
+  file listing shows the folder but not its contents. An existing `.gitignore` is never
+  overwritten. A folder that is a symlink or resolves outside the workspace is refused with 409
+  `inbox_unusable`, and so is a workspace at a file-system root, which gets no incoming folder.
+- **All or nothing.** When any file of a request fails (the limit, a broken body, a full disk,
+  the client hanging up), the files the request created are removed and the error says that
+  nothing was stored. If the bridge itself dies during an upload, a partly written file may stay;
+  nobody was given its path.
+- **Refusals reach the client.** A request refused before its body was read (no permission, an
+  unusable folder, too many transfers, not a form) has its body read and discarded first, up to
+  the limit, and is answered then; otherwise the HTTP server would close the connection with the
+  upload in flight and the client would see a reset. A wrong token, a `models_only` token and a
+  `Content-Length` above the limit are answered at once.
+- **Response 201:** `files` (`name`, `path`, `size` per file, in the order of the request),
+  `inbox` and a `note`. Uploads stay until someone deletes them on the machine; no endpoint
+  lists or deletes them, and there is no quota. A client whose answer was lost uploads again.
+
+### 10.2 Download
+
+`GET /v1/files/download?path=<file>` sends a regular file of a workspace that allows
+`download`, binary ones included. It is resolved and opened exactly like a text read: the path
+is canonicalized, so a link is judged by where it points; the target's workspace and deny
+patterns decide; and a file swapped while it is opened is 409 `path_changed`. The bytes are
+streamed from the checked handle with `Content-Type: application/octet-stream`,
+`Content-Length` and `Content-Disposition: attachment` with the file's name; a file that gets
+shorter while it is sent ends with an aborted connection. An uploaded file can be downloaded
+again where the workspace allows `download`, unless its extension matches a deny pattern.
+
+### 10.3 Limits
+
+| Limit | Value | Why |
+|---|---|---|
+| Upload request | 96 MB (96 000 000 bytes) | Under Cloudflare's 100 MB ceiling in either unit |
+| Downloaded file | 96 MB | The same limit in both directions |
+| Files per upload | 20 | Bounds the files one request creates |
+| Transfers at once, both directions together | 4 | Bounds open files, disk load and memory; further requests get 429 `transfers_busy` with `Retry-After: 5` |
+
+`GET /v1/info` reports the byte limit as `limits.max_transfer_bytes`. Every upload adds a log
+line with the number of files, their total size and the incoming folder; every download adds one
+when it ends, with the bytes sent and whether the file was complete. Client file names and
+contents are never logged.
+
+## 11. CLI
 
 | Command | Purpose |
 |---|---|
@@ -747,11 +840,12 @@ connection, so a client never takes it for a complete one.
 | `launch <agent> [-- args…]` | start an agent in a new tmux session in the current folder and attach, so the bridge can reach it |
 | `hook <agent> <file> [payload]` | internal: record a turn-complete event (used by agent hooks) |
 
-## 11. Platform support
+## 12. Platform support
 
 | Feature | Linux | macOS | Windows |
 |---|---|---|---|
 | API, auth, TLS, files, git | yes | yes | yes |
+| Uploads and downloads | yes | yes | yes (no file modes; see §6) |
 | Headless sessions | yes | yes | yes |
 | tmux sessions | yes | yes | best effort with psmux (bridge-started sessions only) |
 | Discovery of user-started tmux panes | yes | yes | no |
@@ -760,7 +854,7 @@ connection, so a client never takes it for a complete one.
 
 WSL 2 counts as Linux. A bridge inside WSL sees only the agents inside WSL.
 
-## 12. Testing strategy
+## 13. Testing strategy
 
 Focus on behaviour that would hurt if it broke:
 
@@ -780,7 +874,11 @@ Focus on behaviour that would hurt if it broke:
   the upstream (rewritten `model`, merged defaults, member order, key headers, no client
   credentials), the endpoint table, body limits, error mapping, busy slots, keep-alive lines and
   cut answers, hang-ups, the rebuilt transcription form, the `check` probes, and that a
-  `models_only` token reaches nothing else and the config file is never served.
+  `models_only` token reaches nothing else and the config file is never served;
+- file transfer: generated names and extensions, exclusive creation and modes, the incoming
+  folder's checks and `.gitignore`, all-or-nothing uploads (a broken body, the limit, a hang-up),
+  refusals that arrive as JSON over a real connection, the transfer cap, and byte-exact
+  downloads with their refusals.
 
 CI runs `fmt`, `clippy -D warnings` and the tests on Linux, macOS and Windows.
 
@@ -802,7 +900,7 @@ conversation saved in YOLO mode without `bypass_permissions`, and a tmux session
 
 Not checked by hand: native Windows with psmux, and macOS.
 
-## 13. Operational notes
+## 14. Operational notes
 
 - Run the bridge as the same OS user that runs the agents and owns the tmux server.
 - When the bridge stops, open requests get 10 s to finish (long-polls are cut short), then it
@@ -818,7 +916,7 @@ Not checked by hand: native Windows with psmux, and macOS.
 - The first launch of an agent in a new folder may show a trust dialog. Clients answer it with
   keys (`Enter`).
 
-## 14. Future work
+## 15. Future work
 
 - Push notifications to Grok routines when a session finishes or waits for input.
 - An MCP endpoint (Streamable HTTP) for clients that prefer tools over REST.

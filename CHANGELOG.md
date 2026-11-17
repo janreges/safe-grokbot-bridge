@@ -30,6 +30,15 @@ All notable changes to this project are documented in this file. The format is b
   model. It warns when the config file lies inside a workspace, or holds API keys and is
   readable by other users. `init` writes commented model examples.
 
+- File transfer in both directions, with two new workspace capabilities that are off by
+  default. With `upload`, `POST /v1/files/upload?dir=` stores the files of a multipart form in
+  the workspace's incoming folder, `.sgb-inbox`, under generated names such as
+  `2026-11-19.14-32-53.k7q2.zip`, and answers with their paths for an agent. Files are created
+  exclusively, never replace one, and a request stores all of its files or none. With
+  `download`, `GET /v1/files/download?path=` sends any regular file, binary ones included. Both
+  allow 96 MB per request, uploads up to 20 files, and 4 transfers run at once. `check` warns
+  about an incoming folder that is a link, not writable, or writable by others.
+
 ### Changed
 
 - The file endpoints never list or serve the config file the bridge was started with.

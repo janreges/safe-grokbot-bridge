@@ -10,7 +10,8 @@ that gives an agent such as a [Grok Bot](https://x.ai) a narrow, authenticated H
 computers. Through it the agent can read your project folders and git history, see the Claude
 Code, Codex and Hermes sessions running there, talk to them, and start new ones. It can also call
 the models you configure: LLMs, embeddings, rerankers and speech models on your own vLLM server,
-and paid APIs through your keys, with stock OpenAI and Anthropic client libraries.
+and paid APIs through your keys, with stock OpenAI and Anthropic client libraries. And files pass
+both ways: the remote agent uploads files for your agents and downloads what they made.
 
 You keep using your agents as before. The remote agent becomes a coordinator that can hand work to
 them and follow up while you are away from the keyboard, for example from your phone.
@@ -43,7 +44,7 @@ flowchart LR
         tmux["tmux: Claude Code, Codex,<br/>Hermes you can attach to"]
         headless["headless runs:<br/>claude -p, codex exec"]
         external["sessions outside tmux<br/>(experimental)"]
-        files[("allowed folders:<br/>files and git, read-only")]
+        files[("allowed folders:<br/>files and git read-only,<br/>uploads into .sgb-inbox")]
         models["configured models:<br/>vLLM, paid APIs"]
     end
     bot -- "HTTPS + bearer token" --> edge
@@ -82,6 +83,9 @@ flowchart LR
   the upstream keys stay on the machine. Per-model defaults (`chat_template_kwargs`,
   `dimensions`), a model list, streams kept alive through long pauses, and tokens limited to
   models for programs.
+- **File transfer.** Upload files into a folder's incoming folder, under generated names that
+  never replace a file, and download files of any kind, up to 96 MB each way. Both are separate
+  capabilities, off by default.
 - **Read-only project access.** Directory listings (respecting `.gitignore`), text files by line
   range, `git status`, `log`, `diff` and `show`. The file endpoints never serve secrets such as
   `.env` files and private keys. Git output is not filtered, so anything committed to a
@@ -195,6 +199,10 @@ curl -sH "$H" "$B/v1/git/log?dir=/home/me/projects/app&limit=10"
 curl -sH "$H" $B/v1/models
 curl -sH "$H" -H 'content-type: application/json' $B/v1/embeddings \
      -d '{"model": "embed", "input": ["hello"]}'
+
+# Files: upload into the workspace's incoming folder, download anything
+curl -sH "$H" -F 'file=@report.pdf' "$B/v1/files/upload?dir=/home/me/projects/app"
+curl -sH "$H" -o result.zip "$B/v1/files/download?path=/home/me/projects/app/dist/result.zip"
 ```
 
 A program calls the models with a stock client library:
@@ -217,6 +225,8 @@ client.embeddings.create(model="embed", input=["hello"])
 | `GET /v1/sessions/{id}?wait=&lines=` | State, last answer, terminal screen; long-poll while working |
 | `POST /v1/sessions/{id}/input` | `text` and/or `keys` |
 | `DELETE /v1/sessions/{id}` | Stop a session the bridge started |
+| `POST /v1/files/upload?dir=` | Store files in the workspace's incoming folder; returns their paths |
+| `GET /v1/files/download?path=` | Download a file of any kind |
 | `GET /v1/models` | The models this token may call, with type, endpoint and defaults |
 | `POST /v1/chat/completions`, `/v1/messages` | Chat and vision models (OpenAI or Anthropic format) |
 | `POST /v1/embeddings`, `/v1/rerank` | Embedding and reranker models |
@@ -257,6 +267,8 @@ prompts if you allow that. Treat it like an SSH key. In short:
   with an Access service token as a second factor, or enable TLS with key pinning.
 - **Folders:** capabilities per folder; access is read-only by default. Paths are canonicalized,
   so `..` and symlinks cannot escape.
+- **Files:** `upload` and `download` are separate capabilities, off by default. Uploads only add
+  new files under generated names to `.sgb-inbox/`; nothing is ever overwritten.
 - **Models:** upstream keys stay in the config and never reach a client; the bridge never serves
   its own config file. A client names a model, never a URL. Give programs `models_only` tokens,
   which cannot reach folders, git or agents, and limit paid models to named tokens.

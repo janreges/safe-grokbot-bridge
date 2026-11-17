@@ -13,7 +13,9 @@ own machines:
 - send them messages and read their answers,
 - start new agent sessions in an allowed folder, in tmux or headless, and stop them;
 - call the models configured on the machine (local vLLM servers, paid APIs) with stock OpenAI
-  and Anthropic client libraries, while the upstream API keys stay in the config.
+  and Anthropic client libraries, while the upstream API keys stay in the config;
+- pass files both ways: upload files into a workspace's incoming folder and download files of
+  any kind.
 
 One binary runs per machine as a daemon. It is reached through a Cloudflare Tunnel, or directly on
 a public IP using a self-signed certificate with public-key pinning. Every request needs a bearer
@@ -47,7 +49,9 @@ Project-specific rules:
   real implementations exist. Prefer `std`, and add a dependency only when it removes real
   complexity.
 - **Security is the product.** Every endpoint goes through authentication and a workspace
-  capability check. Never add a generic shell or file-write endpoint. Never log tokens. Spawn
+  capability check. Never add a generic shell or file-write endpoint. The only write the API
+  offers is an upload into a workspace's incoming folder, under a name the bridge generates.
+  Never log tokens. Spawn
   subprocesses with an argument vector, never through a shell. Validate every client-controlled
   value that reaches a command line, and use `--` / `--end-of-options` to end option parsing.
 - **External CLIs change weekly.** Claude Code, Codex, Hermes and tmux evolve fast. Keep
@@ -91,6 +95,7 @@ A test fails when `docs/openapi.json` is out of date, so regenerate it after any
 | `src/headless.rs` | Non-interactive agent turns (`claude -p`, `codex exec`, `hermes chat -Q`) |
 | `src/external.rs` | Experimental access to agent sessions running outside tmux |
 | `src/models.rs` | Models behind the bridge: endpoint table, selection, defaults, relay, probes |
+| `src/transfer.rs` | File transfer: uploads into a workspace's incoming folder, downloads |
 | `src/hook.rs` | `hook` subcommand: agent turn-complete events |
 | `src/procs.rs`, `src/exec.rs` | Process inspection and subprocess helpers |
 | `tests/` | Integration tests using fake agents |

@@ -1,6 +1,6 @@
 ---
 name: safe-grokbot-bridge
-description: Install, configure, update and troubleshoot safe-grokbot-bridge on this machine. The bridge is a small daemon that lets a remote AI agent such as Grok Bot read chosen folders and their git history and work with the Claude Code, Codex or Hermes sessions here, and call the models the user configures (local vLLM servers, paid APIs), through an authenticated HTTPS API behind a Cloudflare Tunnel or TLS with key pinning. Use it when the user wants to set up the bridge, decide or change which folders it exposes and what the bot may do there, offer models to the bot, run it as a service, connect a Cloudflare Tunnel, start agent sessions the bot can reach, rotate a token, upgrade, or find out why the bot cannot connect.
+description: Install, configure, update and troubleshoot safe-grokbot-bridge on this machine. The bridge is a small daemon that lets a remote AI agent such as Grok Bot read chosen folders and their git history and work with the Claude Code, Codex or Hermes sessions here, call the models the user configures (local vLLM servers, paid APIs), and pass files both ways, through an authenticated HTTPS API behind a Cloudflare Tunnel or TLS with key pinning. Use it when the user wants to set up the bridge, decide or change which folders it exposes and what the bot may do there, offer models to the bot, let the bot pass files, run it as a service, connect a Cloudflare Tunnel, start agent sessions the bot can reach, rotate a token, upgrade, or find out why the bot cannot connect.
 ---
 
 # safe-grokbot-bridge
@@ -200,6 +200,14 @@ section 6 only needs its token.
    - May it start them **without permission prompts** (`allow_bypass_permissions`)? Default: no.
      Recommend it only for a sandbox folder or a dedicated VM, because such an agent runs
      commands without asking anyone.
+
+   Files are a separate question for each folder; both are off unless the user wants them:
+   - `upload`: the bot may add files for the agents (data, images, archives). They go only to
+     the folder's incoming folder `.sgb-inbox/`, under names the bridge generates, and are never
+     deleted by the bridge. Advise against it in a folder that a web server publishes or that a
+     tool scans for files to run.
+   - `download`: the bot may fetch files of any kind, binary ones included, up to 96 MB. Without
+     it the bot reads only text files.
 
    A folder inside another one gets its own rules, which replace the outer folder's completely,
    `deny` and `agents` included. When a Read folder lies inside a Work folder, say that an agent

@@ -33,6 +33,11 @@ The full threat model is in [docs/design.md](docs/design.md#6-security-model).
 - Plain HTTP is accepted only on loopback. Public listeners require TLS.
 - Failed authentications block the client address for a while. Requests are rate-limited per
   token, and every request is logged with the token name.
+- The only files the API writes are uploads, where `upload` is allowed: new files under names
+  the bridge generates, in the workspace's incoming folder `.sgb-inbox/`, never replacing a file.
+  `download` (files of any kind) is separate from `files` (text only). Both are off by default.
+- Upstream API keys for the models behind the bridge stay in the config. Clients never see them,
+  and the file endpoints never serve the config file.
 - The bridge never runs arbitrary commands. Git and agents are started from argument vectors
   (never a shell) with validated arguments. Git runs without the pager, fsmonitor, external diff
   drivers, textconv, filter drivers and submodule recursion, so a repository's own configuration
@@ -59,6 +64,8 @@ prompts. This is why every installation should run in an isolated environment, a
   computer that holds only the repositories and credentials the work needs.
 - Keep `listen` on `127.0.0.1` and publish the bridge through a Cloudflare Tunnel. Add an Access
   service-token policy as a second factor.
+- Grant `upload` only on folders that no web server publishes and no tool scans for files to
+  run, and `download` only where binary files may leave the machine.
 - Grant `input` and `start` only on the folders that need them. Keep `allow_bypass_permissions`
   off unless the machine is dedicated to agents.
 - Use one token per client and machine, and remove unused ones.
