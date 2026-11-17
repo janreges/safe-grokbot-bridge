@@ -209,13 +209,10 @@ async fn store(
                 "An upload may carry at most {MAX_FILES} files. Send the rest in another request."
             )));
         }
-        let (dir, extension) = (inbox.to_path_buf(), extension(&name));
-        let (path, file) = tokio::task::spawn_blocking(move || {
-            create_unique(&dir, &extension, SystemTime::now(), random_part)
-        })
-        .await
-        .map_err(ApiError::internal)?
-        .map_err(write_error)?;
+        // Created here and not in a blocking task: a client that hangs up while the task runs
+        // would drop this future before the file is registered, and the file would stay.
+        let (path, file) = create_unique(inbox, &extension(&name), SystemTime::now(), random_part)
+            .map_err(write_error)?;
         created.0.push(path.clone());
         let mut file = tokio::fs::File::from_std(file);
         let mut size = 0u64;

@@ -319,13 +319,15 @@ async fn hanging_up_leaves_nothing_behind() {
         use tower::ServiceExt;
         router.oneshot(request).await
     });
+    // Hangs up the moment the second file exists, without giving the upload a chance to run in
+    // between: a file must be cleaned up even when the client leaves right after its creation.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while stored(&h.root).len() < 2 {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the upload never started"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
     }
     call.abort();
     let _ = call.await;
