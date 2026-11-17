@@ -109,8 +109,9 @@ impl Models {
     pub async fn probe(&self, model: &Model) -> Probe {
         let url = match model.api {
             ModelApi::Openai => format!("{}/models", model.url),
-            // Anthropic's model list is paginated, so the probe asks for the one model.
-            ModelApi::Anthropic => format!("{}/models/{}", model.url, model.upstream_model),
+            // Anthropic pages its list, and 1000 is its largest page. The list, not
+            // `/models/{id}`, because Anthropic-compatible servers such as vLLM have only the list.
+            ModelApi::Anthropic => format!("{}/models?limit=1000", model.url),
         };
         let request = authorize(self.client.get(url), model, &HeaderMap::new());
         let answer = async {
@@ -124,11 +125,9 @@ impl Models {
             Ok(Err(err)) => return Probe::Unreachable(causes(&err)),
             Ok(Ok(answer)) => answer,
         };
-        match (model.api, status.as_u16()) {
-            (_, 401 | 403) => Probe::KeyRejected,
-            (ModelApi::Anthropic, 200) => Probe::Ok,
-            (ModelApi::Anthropic, 404) => Probe::UnknownModel { listed: vec![] },
-            (ModelApi::Openai, 200) => {
+        match status.as_u16() {
+            401 | 403 => Probe::KeyRejected,
+            200 => {
                 let Ok(list) = serde_json::from_slice::<Value>(&body) else {
                     return Probe::Unverifiable(200);
                 };
@@ -146,7 +145,7 @@ impl Models {
                     }
                 }
             }
-            (_, status) => Probe::Unverifiable(status),
+            status => Probe::Unverifiable(status),
         }
     }
 

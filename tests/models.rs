@@ -1047,16 +1047,23 @@ async fn probes_tell_the_states_of_an_upstream_apart() {
                         .into_response()
                 }),
             )
+            // Anthropic pages its list (20 by default); Anthropic-compatible servers such as
+            // vLLM have only the list, no `/models/{id}`.
             .route(
-                "/a/models/claude-x",
-                get(|headers: HeaderMap| async move {
+                "/a/models",
+                get(|headers: HeaderMap, uri: axum::http::Uri| async move {
                     if headers.get("x-api-key").is_none_or(|v| v != "good") {
                         return StatusCode::UNAUTHORIZED.into_response();
                     }
                     if headers.get("anthropic-version").is_none() {
                         return StatusCode::BAD_REQUEST.into_response();
                     }
-                    Json(json!({"id": "claude-x"})).into_response()
+                    if uri.query() == Some("limit=1000") {
+                        Json(json!({"data": [{"id": "claude-first"}, {"id": "claude-x"}], "has_more": false}))
+                            .into_response()
+                    } else {
+                        Json(json!({"data": [{"id": "claude-first"}], "has_more": true})).into_response()
+                    }
                 }),
             ),
     )
@@ -1126,6 +1133,8 @@ async fn probes_tell_the_states_of_an_upstream_apart() {
     assert_eq!(probe("claude").await, Probe::Ok);
     assert_eq!(
         probe("missing").await,
-        Probe::UnknownModel { listed: vec![] }
+        Probe::UnknownModel {
+            listed: vec!["claude-first".into(), "claude-x".into()]
+        }
     );
 }
