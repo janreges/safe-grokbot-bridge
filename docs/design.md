@@ -349,7 +349,10 @@ folder, both of which §5 allows, contains the default config file, and a config
 project folder is inside that project's workspace. Therefore:
 
 - The file endpoints never serve the config file the bridge was started with: a listing leaves
-  it out, and reading it answers 403 `denied`. This holds whether or not it contains a key.
+  it out, and reading it answers 403 `denied`. This holds whether or not it contains a key. A
+  hard link to the file is the same file under another name, so it is refused too. Git refuses
+  a repository that contains the config file, because a diff or an old revision would show its
+  keys.
 - `check` warns when the config file lies inside a workspace, and on Unix when it contains an
   `api_key` and is readable by group or others.
 - Owners keep copies of the config (backups, examples with real keys) outside the workspaces.
@@ -408,7 +411,7 @@ the file and git endpoints.
 | `DELETE /v1/sessions/{id}` | input | stop a session the bridge started |
 | `GET /v1/files/download?path=` | download | download a file of any kind, up to 96 MB (§10.2) |
 | `POST /v1/files/upload?dir=` | upload | store files in the workspace's incoming folder (§10.1) |
-| `GET /v1/inbox?state=&to=&limit=` | any but `models_only` | messages left for Grok Bot, without bodies (§11.4) |
+| `GET /v1/inbox?state=&to=&limit=&offset=` | any but `models_only` | messages left for Grok Bot, without bodies (§11.4) |
 | `GET /v1/inbox/{id}` | any but `models_only` | one inbox message with its body |
 | `GET /v1/inbox/{id}/attachments/{name}` | any but `models_only` | an inbox attachment (§11.4) |
 | `POST /v1/inbox/{id}/claim` | any but `models_only` | take a message for a bot (§11.2) |
@@ -734,10 +737,11 @@ free again.
 
 **Pauses in an event stream.** A reasoning model can stay silent for minutes in the middle of a
 stream, and Cloudflare cuts a connection that carries nothing for 125 s. While a
-`text/event-stream` answer is silent and everything sent so far ends at an event boundary (a
-blank line), the bridge sends a comment line `: keep-alive` every 20 s. Comment lines are part of
-the event-stream format and parsers skip them; this is the one addition the bridge makes to an
-answer.
+`text/event-stream` answer is silent, the bridge sends a comment line `: keep-alive` every 20 s,
+at the end of a line. Between events the comment is followed by a blank line; inside an event it
+is a comment line alone, which the format skips and which does not end the event. Only a partial
+line waits, because nothing may join it. Comment lines are part of the event-stream format and
+parsers skip them; this is the one addition the bridge makes to an answer.
 
 ### 9.2 The model list
 
@@ -756,6 +760,8 @@ the upstreams. `GET /v1/info` carries the same entries in `models`.
 |---|---|---|
 | JSON body of a model call | 32 MiB | Images travel inside chat requests as base64 |
 | Form body (`speech-to-text`) | 96 MB (96 000 000 bytes) | Under Cloudflare's 100 MB ceiling in either unit |
+| Fields of a form | 64 | A transcription form has about ten; each field costs memory beyond the byte limit |
+| Time to send a request body | 5 min | A client that trickles bytes holds its model or transfer slot for at most this long |
 | Model calls at once | `max_model_requests`, default 16 | Bounds memory and protects a home GPU |
 | Wait for a free slot | 10 s | Back-pressure for a parallel indexing job instead of an immediate error |
 | Connect to an upstream | 5 s | An upstream that is off is reported quickly |
@@ -882,7 +888,7 @@ The only write the API offers is still the upload (§10.1).
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /v1/inbox?state=&to=&limit=` | the messages, newest first, without bodies; `state` is `unread` (default), `claimed`, `released` or `all`; `to` shows the messages for that bot and for every bot; `limit` is 1–200 (default 50); the answer says whether it is `truncated` and what to do next |
+| `GET /v1/inbox?state=&to=&limit=&offset=` | the messages, newest first, without bodies; `state` is `unread` (default), `claimed`, `released` or `all`; `to` shows the messages for that bot and for every bot; `limit` is 1–200 (default 50); `offset` skips that many of the newest, for the next page; the answer says whether it is `truncated` and its note names the next `offset` |
 | `GET /v1/inbox/{id}` | one message with its `body` |
 | `GET /v1/inbox/{id}/attachments/{name}` | an attachment, with the file download's limits (§10.2) |
 | `POST /v1/inbox/{id}/claim` `{"bot", "note"}` | take the message for a bot |

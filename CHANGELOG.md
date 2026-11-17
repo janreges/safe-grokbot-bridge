@@ -16,6 +16,19 @@ All notable changes to this project are documented in this file. The format is b
   `GET /v1/inbox/{id}`, downloads attachments from `GET /v1/inbox/{id}/attachments/{name}`, takes
   one with `POST /v1/inbox/{id}/claim` (a 409 names the bot that holds it) and gives it back with
   `POST /v1/inbox/{id}/release`. Messages live in the state directory, outside every workspace.
+  A listing pages through every message with `offset`; a page that is cut short names the offset
+  of the next one.
+
+### Fixed
+
+- The config file is refused under a hard link too, and a git repository that contains it is
+  refused: a diff or an old revision would have shown its keys.
+- A syntax error in the config prints the line and column, not the line itself, which may hold
+  an `api_key`.
+- A model call or upload must arrive within five minutes, so a client that trickles bytes cannot
+  hold a slot for ever; a transcription form carries at most 64 fields.
+- A keep-alive also keeps a stream alive in the middle of an event, and the explanation of an
+  upstream 404 or redirect is sent within two seconds, even when the upstream keeps the body open.
 
 ## [0.4.0] - 2026-11-17
 

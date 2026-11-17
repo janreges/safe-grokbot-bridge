@@ -181,7 +181,8 @@ as `%20`, as in `Chief%20of%20Staff`:
 
 1. **List.** `sgb <machine> GET "/v1/inbox?state=unread&to=<your bot name>"`, then the same with
    `state=released` for messages a bot gave back. Each entry has the id, the kind (`task` or
-   `followup`), the subject, the project folder and the claim history.
+   `followup`), the subject, the project folder and the claim history. When the list is cut short,
+   its `note` names the `offset` of the next page: add `&offset=<n>` to read on.
 2. **Read in full.** `sgb <machine> GET /v1/inbox/<id>` returns the Markdown `body` and the list of
    attachments. Fetch an attachment from `/v1/inbox/<id>/attachments/<name>` with `sgbf` (see Files).
 3. **Decide.** A `followup` belongs to a discussion that is already under way: find that discussion
