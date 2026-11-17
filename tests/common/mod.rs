@@ -4,12 +4,14 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::ConnectInfo;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use http_body_util::BodyExt;
 use safe_grokbot_bridge::config::Config;
+use safe_grokbot_bridge::models::Timing;
 use safe_grokbot_bridge::{api, auth, server};
 use serde_json::Value;
 use tower::ServiceExt;
@@ -23,6 +25,11 @@ pub struct Harness {
 
 /// A bridge with one workspace (a temp dir) allowing `allow`, plus `extra` config.
 pub async fn harness(allow: &str, extra: &str) -> Harness {
+    harness_timed(allow, extra, Timing::default()).await
+}
+
+/// [`harness`] with the time rules of model calls shortened.
+pub async fn harness_timed(allow: &str, extra: &str, timing: Timing) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(dir.path()).unwrap().join("ws");
     std::fs::create_dir(&root).unwrap();
@@ -34,13 +41,86 @@ pub async fn harness(allow: &str, extra: &str) -> Harness {
         toml_str(&root),
     );
     let config = Config::parse(&text, Path::new("test.toml")).unwrap();
-    let router = api::router(server::App::new(config).await.unwrap());
+    let router = api::router(server::App::with_timing(config, timing).await.unwrap());
     Harness {
         router,
         token,
         root,
         dir,
     }
+}
+
+/// A request as an upstream received it.
+#[derive(Clone, Debug)]
+pub struct Seen {
+    pub method: String,
+    pub uri: String,
+    pub headers: HeaderMap,
+    pub body: Bytes,
+}
+
+/// A model server started by a test.
+pub struct Upstream {
+    /// Base URL with the version prefix: `http://127.0.0.1:<port>/v1`.
+    pub url: String,
+    pub seen: Arc<Mutex<Vec<Seen>>>,
+}
+
+impl Upstream {
+    pub fn last(&self) -> Seen {
+        self.seen
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("the upstream got no request")
+    }
+
+    pub fn count(&self) -> usize {
+        self.seen.lock().unwrap().len()
+    }
+}
+
+/// Serves `router` on a free local port and records every request it gets.
+pub async fn upstream(router: axum::Router) -> Upstream {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let app = router.layer(axum::middleware::from_fn(
+        move |request: Request<Body>, next: axum::middleware::Next| {
+            let record = record.clone();
+            async move {
+                let (parts, body) = request.into_parts();
+                let body = body.collect().await.unwrap().to_bytes();
+                record.lock().unwrap().push(Seen {
+                    method: parts.method.to_string(),
+                    uri: parts.uri.to_string(),
+                    headers: parts.headers.clone(),
+                    body: body.clone(),
+                });
+                next.run(Request::from_parts(parts, Body::from(body))).await
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    Upstream {
+        url: format!("http://127.0.0.1:{port}/v1"),
+        seen,
+    }
+}
+
+/// A local port nothing listens on.
+pub fn closed_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+/// Collects a response body and parses it as JSON (or returns it as a JSON string).
+pub async fn json_body(response: axum::response::Response) -> Value {
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()))
 }
 
 /// A second token: `(token, "[[tokens]]…" TOML with the `extra` lines)`.

@@ -1,15 +1,99 @@
-//! Models behind the bridge: the endpoint table, model selection, defaults and the model list.
+//! Models behind the bridge: the endpoint table, model selection, defaults, the model list and
+//! the relay of calls to the upstream servers.
 //!
 //! Everything the bridge knows about upstream model APIs (paths, auth header styles, the
 //! Anthropic version header) lives in this module, the way agent knowledge lives in `agents.rs`.
 
-use axum::http::StatusCode;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::Context;
+use axum::body::{Body, Bytes};
+use axum::extract::Request;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use utoipa::ToSchema;
 
+use crate::auth::Caller;
 use crate::config::{Config, Model, ModelApi, ModelType};
 use crate::error::ApiError;
+use crate::server::AppState;
+
+/// Body limit of a model call with a JSON body: images travel inside chat requests as base64.
+pub const MAX_JSON_BODY: usize = 32 * 1024 * 1024;
+/// Sent when the client names no version; Anthropic's API requires the header.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+const BUSY_RETRY_SECS: u64 = 5;
+
+/// The time rules of model calls. Constants in production; tests shorten them.
+#[derive(Clone, Debug)]
+pub struct Timing {
+    /// How long a call waits for a free slot before `models_busy`.
+    pub slot_wait: Duration,
+    /// Connecting to an upstream.
+    pub connect: Duration,
+    /// From sending the request to the head of the answer. With the slot wait it stays under
+    /// Cloudflare's 125 s, so the caller gets the bridge's error and not Cloudflare's page.
+    pub first_byte: Duration,
+    /// Silence inside an answer that is not an event stream.
+    pub silence: Duration,
+    /// Silence inside an event stream, bridged by keep-alive lines.
+    pub stream_silence: Duration,
+    /// Interval of keep-alive lines in a silent event stream.
+    pub keep_alive: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self {
+            slot_wait: Duration::from_secs(10),
+            connect: Duration::from_secs(5),
+            first_byte: Duration::from_secs(90),
+            silence: Duration::from_secs(90),
+            stream_silence: Duration::from_secs(600),
+            keep_alive: Duration::from_secs(20),
+        }
+    }
+}
+
+/// The HTTP client and the slots shared by all model calls.
+pub struct Models {
+    client: reqwest::Client,
+    slots: Arc<Semaphore>,
+    timing: Timing,
+}
+
+impl Models {
+    pub fn new(config: &Config, timing: Timing) -> anyhow::Result<Models> {
+        // reqwest is built without a crypto provider of its own so that TLS stays on `ring`, like
+        // the server's; it panics unless a process default is installed first.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::Client::builder()
+            // Otherwise HTTP_PROXY and its relatives from the environment would route model calls.
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(timing.connect)
+            .build()
+            .context("cannot create the HTTP client for model calls")?;
+        Ok(Models {
+            client,
+            slots: Arc::new(Semaphore::new(config.limits.max_model_requests)),
+            timing,
+        })
+    }
+
+    async fn slot(&self) -> Option<OwnedSemaphorePermit> {
+        let acquire = self.slots.clone().acquire_owned();
+        tokio::time::timeout(self.timing.slot_wait, acquire)
+            .await
+            .ok()?
+            .ok()
+    }
+}
 
 /// A model endpoint of the bridge and the upstream path it forwards to.
 pub struct Endpoint {
@@ -249,6 +333,321 @@ pub fn list(config: &Config, token: &str, kind: Option<ModelType>, created: u64)
         object: "list".into(),
         data,
         note,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Calls
+// ---------------------------------------------------------------------------------------------
+
+/// One model call with a JSON body, from the unread request to the relayed answer.
+pub async fn call_json(
+    app: &AppState,
+    endpoint: &'static Endpoint,
+    caller: &Caller,
+    request: Request,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    // The slot comes before the body, so that memory is bounded by the number of slots.
+    let Some(slot) = app.models.slot().await else {
+        drain(body, MAX_JSON_BODY).await;
+        return busy(&app.config).into_response();
+    };
+    let bytes = match read_body(body, MAX_JSON_BODY).await {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            return ApiError::too_large(
+                "The request body is larger than 32 MiB, the limit of a model call. Send fewer or smaller images, or split the input into several calls.",
+            )
+            .into_response();
+        }
+        Err(err) => {
+            return ApiError::bad_request(format!("The request body could not be read: {err}"))
+                .into_response();
+        }
+    };
+    let (model, body) = match prepare_json(&app.config, endpoint, &caller.token, &bytes) {
+        Ok(prepared) => prepared,
+        Err(err) => return err.into_response(),
+    };
+    let request = app
+        .models
+        .client
+        .post(format!("{}{}", model.url, endpoint.upstream_path))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body);
+    let request = authorize(request, model, &parts.headers);
+    forward(app, endpoint, model, request, slot).await
+}
+
+/// Picks the model a JSON body names and rewrites the body for its upstream.
+fn prepare_json<'a>(
+    config: &'a Config,
+    endpoint: &Endpoint,
+    token: &str,
+    bytes: &[u8],
+) -> Result<(&'a Model, Vec<u8>), ApiError> {
+    let invalid = |detail: String| {
+        ApiError::bad_request(format!(
+            "The body must be a JSON object with a string `model`, the name of a model from GET /v1/models; {detail}"
+        ))
+    };
+    let mut body: Map<String, Value> = serde_json::from_slice(bytes)
+        .map_err(|err| invalid(format!("this one could not be read as such: {err}.")))?;
+    let Some(Value::String(name)) = body.get("model") else {
+        return Err(invalid("`model` is missing or not a string.".into()));
+    };
+    let model = select(config, endpoint, &name.clone(), token)?;
+    body.insert("model".into(), Value::String(model.upstream_model.clone()));
+    merge_defaults(&mut body, &model.defaults);
+    let body = serde_json::to_vec(&body).map_err(ApiError::internal)?;
+    Ok((model, body))
+}
+
+/// Adds the model's key and API headers. Nothing else of the client's request travels on: its
+/// `Authorization` and `x-api-key` carry the bridge token.
+fn authorize(
+    request: reqwest::RequestBuilder,
+    model: &Model,
+    client: &HeaderMap,
+) -> reqwest::RequestBuilder {
+    match model.api {
+        ModelApi::Openai => match &model.api_key {
+            Some(key) => request.bearer_auth(key.expose()),
+            None => request,
+        },
+        ModelApi::Anthropic => {
+            let mut request = request;
+            if let Some(key) = &model.api_key {
+                request = request.header("x-api-key", key.expose());
+            }
+            let version = client
+                .get("anthropic-version")
+                .cloned()
+                .unwrap_or(HeaderValue::from_static(ANTHROPIC_VERSION));
+            request = request.header("anthropic-version", version);
+            if let Some(beta) = client.get("anthropic-beta") {
+                request = request.header("anthropic-beta", beta.clone());
+            }
+            request
+        }
+    }
+}
+
+/// Sends a prepared upstream request and relays the answer, or explains why there is none.
+async fn forward(
+    app: &AppState,
+    endpoint: &'static Endpoint,
+    model: &Model,
+    request: reqwest::RequestBuilder,
+    slot: OwnedSemaphorePermit,
+) -> Response {
+    let timing = &app.models.timing;
+    let started = Instant::now();
+    let upstream = match tokio::time::timeout(timing.first_byte, request.send()).await {
+        Ok(Ok(upstream)) => upstream,
+        Ok(Err(err)) => return upstream_error(model, started, unreachable(model, &err)),
+        Err(_) => {
+            let advice = if endpoint.streams {
+                "For long generations send `stream: true`: a stream starts at once, and the bridge keeps it alive through pauses."
+            } else {
+                "A call that takes longer cannot pass through the bridge, because the connection is cut when it stays silent; split the work into smaller calls."
+            };
+            let err = ApiError::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream_timeout",
+                format!(
+                    "Model `{}` did not start to answer within {}. {advice}",
+                    model.name,
+                    humantime::format_duration(timing.first_byte)
+                ),
+            );
+            return upstream_error(model, started, err);
+        }
+    };
+    let status = upstream.status();
+    tracing::info!(
+        model = %model.name,
+        status = status.as_u16(),
+        ms = started.elapsed().as_millis() as u64,
+        "model call"
+    );
+    let table = format!("[models.{}]", model.name);
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        let err = ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "upstream_auth_failed",
+            format!(
+                "The server behind model `{}` rejected the bridge's key with HTTP {status}: `api_key` in {table} of the bridge's config is wrong or missing. Tell the machine's owner; retrying will not help, and your bridge token is fine.",
+                model.name
+            ),
+        );
+        return upstream_error(model, started, err);
+    }
+    if status.is_redirection() || status == StatusCode::NOT_FOUND {
+        let start = excerpt(upstream, timing.silence).await;
+        let what = if status.is_redirection() {
+            "a redirect, which the bridge does not follow".to_string()
+        } else if start.is_empty() {
+            "with an empty body".to_string()
+        } else {
+            format!("starting `{start}`")
+        };
+        let err = ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "upstream_misconfigured",
+            format!(
+                "The server behind model `{}` answered HTTP {status} ({what}) for {}. This means that `url` or `model` in {table} of the bridge's config is wrong (a typo, a missing `/v1`, or `http` where the server wants `https`). Tell the machine's owner; retrying will not help.",
+                model.name, endpoint.upstream_path
+            ),
+        );
+        return upstream_error(model, started, err);
+    }
+    relay(upstream, slot)
+}
+
+/// The start of an answer the bridge explains instead of relaying: at most 300 characters.
+async fn excerpt(mut upstream: reqwest::Response, wait: Duration) -> String {
+    let mut bytes = Vec::new();
+    let read = async {
+        while bytes.len() < 4096 {
+            match upstream.chunk().await {
+                Ok(Some(chunk)) => bytes.extend_from_slice(&chunk),
+                _ => break,
+            }
+        }
+    };
+    let _ = tokio::time::timeout(wait, read).await;
+    let text: String = String::from_utf8_lossy(&bytes).chars().take(300).collect();
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn unreachable(model: &Model, err: &reqwest::Error) -> ApiError {
+    if err.is_builder() {
+        return ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "upstream_misconfigured",
+            format!(
+                "The request to model `{}` could not be built; `url` or `api_key` in [models.{}] of the bridge's config is invalid. Tell the machine's owner.",
+                model.name, model.name
+            ),
+        );
+    }
+    // The error's own text names the upstream URL, which stays private; its causes do not.
+    let mut causes = Vec::new();
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        causes.push(cause.to_string());
+        source = cause.source();
+    }
+    let reason = if causes.is_empty() {
+        "the connection failed".to_string()
+    } else {
+        causes.join(": ")
+    };
+    ApiError::new(
+        StatusCode::BAD_GATEWAY,
+        "upstream_unreachable",
+        format!(
+            "The server behind model `{}` cannot be reached ({reason}). It may be switched off, or `url` in [models.{}] of the bridge's config is wrong. Try another model or tell the machine's owner.",
+            model.name, model.name
+        ),
+    )
+}
+
+/// The bridge's own answer for an upstream failure. Client libraries retry a 5xx twice unless
+/// told not to, and such a call cannot succeed on a retry.
+fn upstream_error(model: &Model, started: Instant, err: ApiError) -> Response {
+    tracing::warn!(
+        model = %model.name,
+        code = err.code,
+        ms = started.elapsed().as_millis() as u64,
+        "model call failed"
+    );
+    let mut response = err.into_response();
+    response
+        .headers_mut()
+        .insert("x-should-retry", HeaderValue::from_static("false"));
+    response
+}
+
+fn busy(config: &Config) -> ApiError {
+    ApiError::too_many(
+        "models_busy",
+        format!(
+            "All {} model slots of this bridge stayed taken for 10 seconds. Wait `Retry-After` seconds and try again, or run fewer calls at once.",
+            config.limits.max_model_requests
+        ),
+        BUSY_RETRY_SECS,
+    )
+}
+
+/// Relays the upstream's status, content type, `Retry-After` and body as it arrives. The body
+/// owns the upstream response and the slot, so dropping it ends the call and frees the slot.
+fn relay(upstream: reqwest::Response, slot: OwnedSemaphorePermit) -> Response {
+    let mut response = Response::builder().status(upstream.status());
+    for name in [header::CONTENT_TYPE, header::RETRY_AFTER] {
+        if let Some(value) = upstream.headers().get(&name) {
+            response = response.header(name, value.clone());
+        }
+    }
+    let state = Relay {
+        upstream,
+        _slot: slot,
+        done: false,
+    };
+    let body = futures_util::stream::unfold(state, |mut state| async move {
+        if state.done {
+            return None;
+        }
+        match state.upstream.chunk().await {
+            Ok(Some(chunk)) => Some((Ok(chunk), state)),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(error = %err.without_url(), "a model answer broke off");
+                state.done = true;
+                Some((
+                    Err(std::io::Error::other("the model's answer broke off")),
+                    state,
+                ))
+            }
+        }
+    });
+    response
+        .body(Body::from_stream(body))
+        .unwrap_or_else(|err| ApiError::internal(err).into_response())
+}
+
+struct Relay {
+    upstream: reqwest::Response,
+    _slot: OwnedSemaphorePermit,
+    done: bool,
+}
+
+/// Reads a body of at most `limit` bytes; `None` when it is larger.
+async fn read_body(body: Body, limit: usize) -> Result<Option<Bytes>, axum::Error> {
+    let mut stream = body.into_data_stream();
+    let mut out = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if out.len() + chunk.len() > limit {
+            return Ok(None);
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(Some(out.into()))
+}
+
+/// Reads and discards a body before an early answer: the HTTP server would otherwise close a
+/// connection with a body in flight, and the client would see a reset instead of the answer.
+async fn drain(body: Body, limit: usize) {
+    let mut stream = body.into_data_stream();
+    let mut read = 0;
+    while let Some(Ok(chunk)) = stream.next().await {
+        read += chunk.len();
+        if read > limit {
+            break;
+        }
     }
 }
 

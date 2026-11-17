@@ -22,6 +22,7 @@ use tower::ServiceExt;
 use crate::api;
 use crate::auth::Auth;
 use crate::config::Config;
+use crate::models::{Models, Timing};
 use crate::sessions::Sessions;
 use crate::tls;
 
@@ -39,6 +40,7 @@ pub struct App {
     pub config: Arc<Config>,
     pub auth: Auth,
     pub sessions: Arc<Sessions>,
+    pub models: Models,
     pub started_at: SystemTime,
 }
 
@@ -46,10 +48,16 @@ pub type AppState = Arc<App>;
 
 impl App {
     pub async fn new(config: Config) -> Result<AppState> {
+        Self::with_timing(config, Timing::default()).await
+    }
+
+    /// [`App::new`] with other time rules for model calls; tests shorten them.
+    pub async fn with_timing(config: Config, timing: Timing) -> Result<AppState> {
         let config = Arc::new(config);
         Ok(Arc::new(App {
             auth: Auth::new(&config),
             sessions: Arc::new(Sessions::new(config.clone()).await),
+            models: Models::new(&config, timing)?,
             config,
             started_at: SystemTime::now(),
         }))

@@ -91,6 +91,382 @@
         }
       }
     },
+    "/v1/audio/speech": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Speech from text with a `text-to-speech` model, in the OpenAI format (`input`, `voice`,\n`response_format`). The audio comes back as the upstream sent it, with its content type.",
+        "operationId": "speech",
+        "requestBody": {
+          "description": "An OpenAI speech request",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The audio, with the upstream's content type such as `audio/mpeg`",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "400": {
+            "description": "`invalid_request`: the body is not a JSON object with a string `model`. `wrong_model_type`: the model is called through another endpoint, which the message names. Or the upstream rejected the request, in its own error format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`forbidden`: the model is not open to this token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`model_not_found`: no model of that name; the message lists the ones you may call here",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`too_large`: the body is larger than 32 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The bridge's own answer when the model's server rejects the configured key (`upstream_auth_failed`), is configured wrongly (`upstream_misconfigured`) or cannot be reached (`upstream_unreachable`). Sent with `x-should-retry: false`: only the machine's owner can fix it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`upstream_timeout`: the model did not start to answer within 90 seconds; use `stream: true` where the endpoint has it. Sent with `x-should-retry: false`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Chat with a `chat` or `vision` model whose `api` is `openai`, in the OpenAI Chat Completions\nformat. `model` is a name from GET /v1/models; the bridge replaces it with the upstream's name,\nfills in the model's `defaults` where your body does not set them, and passes everything else\non unchanged. The answer comes back as the model's server sent it. For long generations send\n`stream: true`: an answer that has not started within 90 seconds is cut, a stream is kept alive.",
+        "operationId": "chat_completions",
+        "requestBody": {
+          "description": "An OpenAI chat completion request",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The upstream's answer: a chat completion, or server-sent events with `stream: true`",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_request`: the body is not a JSON object with a string `model`. `wrong_model_type`: the model is called through another endpoint, which the message names. Or the upstream rejected the request, in its own error format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`forbidden`: the model is not open to this token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`model_not_found`: no model of that name; the message lists the ones you may call here",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`too_large`: the body is larger than 32 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The bridge's own answer when the model's server rejects the configured key (`upstream_auth_failed`), is configured wrongly (`upstream_misconfigured`) or cannot be reached (`upstream_unreachable`). Sent with `x-should-retry: false`: only the machine's owner can fix it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`upstream_timeout`: the model did not start to answer within 90 seconds; use `stream: true` where the endpoint has it. Sent with `x-should-retry: false`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/embeddings": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Embeddings from an `embedding` model, in the OpenAI format. `dimensions` sets the vector size\non models that support it; the model's `defaults` in GET /v1/models show what is filled in.\nThe call has no stream mode: it must start to answer within 90 seconds, so send large inputs\nin batches.",
+        "operationId": "embeddings",
+        "requestBody": {
+          "description": "An OpenAI embeddings request",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The upstream's answer",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_request`: the body is not a JSON object with a string `model`. `wrong_model_type`: the model is called through another endpoint, which the message names. Or the upstream rejected the request, in its own error format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`forbidden`: the model is not open to this token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`model_not_found`: no model of that name; the message lists the ones you may call here",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`too_large`: the body is larger than 32 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The bridge's own answer when the model's server rejects the configured key (`upstream_auth_failed`), is configured wrongly (`upstream_misconfigured`) or cannot be reached (`upstream_unreachable`). Sent with `x-should-retry: false`: only the machine's owner can fix it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`upstream_timeout`: the model did not start to answer within 90 seconds; use `stream: true` where the endpoint has it. Sent with `x-should-retry: false`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/files": {
       "get": {
         "tags": [
@@ -894,6 +1270,132 @@
         }
       }
     },
+    "/v1/images/generations": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Images from a prompt with an `image-generator` model, in the OpenAI format. The call must\nstart to answer within 90 seconds.",
+        "operationId": "image_generations",
+        "requestBody": {
+          "description": "An OpenAI image generation request",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The upstream's answer",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_request`: the body is not a JSON object with a string `model`. `wrong_model_type`: the model is called through another endpoint, which the message names. Or the upstream rejected the request, in its own error format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`forbidden`: the model is not open to this token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`model_not_found`: no model of that name; the message lists the ones you may call here",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`too_large`: the body is larger than 32 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The bridge's own answer when the model's server rejects the configured key (`upstream_auth_failed`), is configured wrongly (`upstream_misconfigured`) or cannot be reached (`upstream_unreachable`). Sent with `x-should-retry: false`: only the machine's owner can fix it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`upstream_timeout`: the model did not start to answer within 90 seconds; use `stream: true` where the endpoint has it. Sent with `x-should-retry: false`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/info": {
       "get": {
         "tags": [
@@ -932,6 +1434,132 @@
                 "description": "Seconds to wait before retrying"
               }
             },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/messages": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Chat with a `chat` or `vision` model whose `api` is `anthropic`, in the Anthropic Messages\nformat. Anthropic's client library uses the bridge's base URL without `/v1` and sends the\nbridge token as its API key in `x-api-key`. `anthropic-version` and `anthropic-beta` are\npassed on; `model`, `defaults` and streaming work as for POST /v1/chat/completions.",
+        "operationId": "messages",
+        "requestBody": {
+          "description": "An Anthropic Messages request",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The upstream's answer: a message, or server-sent events with `stream: true`",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_request`: the body is not a JSON object with a string `model`. `wrong_model_type`: the model is called through another endpoint, which the message names. Or the upstream rejected the request, in its own error format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`forbidden`: the model is not open to this token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`model_not_found`: no model of that name; the message lists the ones you may call here",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`too_large`: the body is larger than 32 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The bridge's own answer when the model's server rejects the configured key (`upstream_auth_failed`), is configured wrongly (`upstream_misconfigured`) or cannot be reached (`upstream_unreachable`). Sent with `x-should-retry: false`: only the machine's owner can fix it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`upstream_timeout`: the model did not start to answer within 90 seconds; use `stream: true` where the endpoint has it. Sent with `x-should-retry: false`",
             "content": {
               "application/json": {
                 "schema": {
@@ -1012,6 +1640,132 @@
                 "description": "Seconds to wait before retrying"
               }
             },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error in the bridge; `error.message` says what failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/rerank": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Reranks documents against a query with a `reranker` model, in the format of vLLM, Jina and\nCohere (`query`, `documents`, optional `top_n`). The call must start to answer within 90\nseconds.",
+        "operationId": "rerank",
+        "requestBody": {
+          "description": "A rerank request",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The upstream's answer",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_request`: the body is not a JSON object with a string `model`. `wrong_model_type`: the model is called through another endpoint, which the message names. Or the upstream rejected the request, in its own error format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`forbidden`: the model is not open to this token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`model_not_found`: no model of that name; the message lists the ones you may call here",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`too_large`: the body is larger than 32 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded, or this address is blocked after failed authentications",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait before retrying"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The bridge's own answer when the model's server rejects the configured key (`upstream_auth_failed`), is configured wrongly (`upstream_misconfigured`) or cannot be reached (`upstream_unreachable`). Sent with `x-should-retry: false`: only the machine's owner can fix it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`upstream_timeout`: the model did not start to answer within 90 seconds; use `stream: true` where the endpoint has it. Sent with `x-should-retry: false`",
             "content": {
               "application/json": {
                 "schema": {

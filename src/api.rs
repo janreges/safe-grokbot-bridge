@@ -90,6 +90,12 @@ fn open_routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(openapi_document))
         .routes(routes!(list_models))
+        .routes(routes!(chat_completions))
+        .routes(routes!(messages))
+        .routes(routes!(embeddings))
+        .routes(routes!(rerank))
+        .routes(routes!(speech))
+        .routes(routes!(image_generations))
 }
 
 /// Endpoints closed to `models_only` tokens.
@@ -156,6 +162,31 @@ fn add_common_responses(openapi: &mut utoipa::openapi::OpenApi) {
         .description("An unexpected error in the bridge; `error.message` says what failed")
         .content("application/json", error())
         .build();
+    // Model calls pass their body on unparsed, so they have errors of their own.
+    let model_errors = [
+        (
+            "400",
+            "`invalid_request`: the body is not a JSON object with a string `model`. `wrong_model_type`: the model is called through another endpoint, which the message names. Or the upstream rejected the request, in its own error format",
+        ),
+        ("403", "`forbidden`: the model is not open to this token"),
+        (
+            "404",
+            "`model_not_found`: no model of that name; the message lists the ones you may call here",
+        ),
+        ("413", "`too_large`: the body is larger than 32 MiB"),
+        (
+            "429",
+            "`models_busy`: every model slot stayed taken for 10 seconds (wait `Retry-After` seconds), or the upstream's own 429, passed on",
+        ),
+        (
+            "502",
+            "The bridge's own answer when the model's server rejects the configured key (`upstream_auth_failed`), is configured wrongly (`upstream_misconfigured`) or cannot be reached (`upstream_unreachable`). Sent with `x-should-retry: false`: only the machine's owner can fix it",
+        ),
+        (
+            "504",
+            "`upstream_timeout`: the model did not start to answer within 90 seconds; use `stream: true` where the endpoint has it. Sent with `x-should-retry: false`",
+        ),
+    ];
     let body_errors = [
         ("413", "The JSON body is larger than 1 MiB"),
         (
@@ -179,6 +210,11 @@ fn add_common_responses(openapi: &mut utoipa::openapi::OpenApi) {
         ];
         for operation in operations.into_iter().flatten() {
             let has_body = operation.request_body.is_some();
+            let model_call = has_body
+                && operation
+                    .tags
+                    .as_ref()
+                    .is_some_and(|tags| tags.iter().any(|tag| tag == "models"));
             let responses = &mut operation.responses.responses;
             responses
                 .entry("default".into())
@@ -201,7 +237,17 @@ fn add_common_responses(openapi: &mut utoipa::openapi::OpenApi) {
                     }
                 }
             }
-            if has_body {
+            if model_call {
+                for (status, description) in model_errors {
+                    responses.entry(status.into()).or_insert_with(|| {
+                        ResponseBuilder::new()
+                            .description(description)
+                            .content("application/json", error())
+                            .build()
+                            .into()
+                    });
+                }
+            } else if has_body {
                 for (status, description) in body_errors {
                     responses.entry(status.into()).or_insert_with(|| {
                         ResponseBuilder::new()
@@ -871,4 +917,102 @@ async fn list_models(
         kind,
         started_secs(&app),
     )))
+}
+
+/// Chat with a `chat` or `vision` model whose `api` is `openai`, in the OpenAI Chat Completions
+/// format. `model` is a name from GET /v1/models; the bridge replaces it with the upstream's name,
+/// fills in the model's `defaults` where your body does not set them, and passes everything else
+/// on unchanged. The answer comes back as the model's server sent it. For long generations send
+/// `stream: true`: an answer that has not started within 90 seconds is cut, a stream is kept alive.
+#[utoipa::path(post, path = "/v1/chat/completions", tag = "models",
+    request_body(content = serde_json::Value, description = "An OpenAI chat completion request"),
+    responses(
+        (status = 200, description = "The upstream's answer: a chat completion, or server-sent events with `stream: true`", body = serde_json::Value),
+    ))]
+async fn chat_completions(
+    State(app): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    models::call_json(&app, &models::CHAT_COMPLETIONS, &caller, request).await
+}
+
+/// Chat with a `chat` or `vision` model whose `api` is `anthropic`, in the Anthropic Messages
+/// format. Anthropic's client library uses the bridge's base URL without `/v1` and sends the
+/// bridge token as its API key in `x-api-key`. `anthropic-version` and `anthropic-beta` are
+/// passed on; `model`, `defaults` and streaming work as for POST /v1/chat/completions.
+#[utoipa::path(post, path = "/v1/messages", tag = "models",
+    request_body(content = serde_json::Value, description = "An Anthropic Messages request"),
+    responses(
+        (status = 200, description = "The upstream's answer: a message, or server-sent events with `stream: true`", body = serde_json::Value),
+    ))]
+async fn messages(
+    State(app): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    models::call_json(&app, &models::MESSAGES, &caller, request).await
+}
+
+/// Embeddings from an `embedding` model, in the OpenAI format. `dimensions` sets the vector size
+/// on models that support it; the model's `defaults` in GET /v1/models show what is filled in.
+/// The call has no stream mode: it must start to answer within 90 seconds, so send large inputs
+/// in batches.
+#[utoipa::path(post, path = "/v1/embeddings", tag = "models",
+    request_body(content = serde_json::Value, description = "An OpenAI embeddings request"),
+    responses(
+        (status = 200, description = "The upstream's answer", body = serde_json::Value),
+    ))]
+async fn embeddings(
+    State(app): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    models::call_json(&app, &models::EMBEDDINGS, &caller, request).await
+}
+
+/// Reranks documents against a query with a `reranker` model, in the format of vLLM, Jina and
+/// Cohere (`query`, `documents`, optional `top_n`). The call must start to answer within 90
+/// seconds.
+#[utoipa::path(post, path = "/v1/rerank", tag = "models",
+    request_body(content = serde_json::Value, description = "A rerank request"),
+    responses(
+        (status = 200, description = "The upstream's answer", body = serde_json::Value),
+    ))]
+async fn rerank(
+    State(app): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    models::call_json(&app, &models::RERANK, &caller, request).await
+}
+
+/// Speech from text with a `text-to-speech` model, in the OpenAI format (`input`, `voice`,
+/// `response_format`). The audio comes back as the upstream sent it, with its content type.
+#[utoipa::path(post, path = "/v1/audio/speech", tag = "models",
+    request_body(content = serde_json::Value, description = "An OpenAI speech request"),
+    responses(
+        (status = 200, description = "The audio, with the upstream's content type such as `audio/mpeg`", content_type = "application/octet-stream"),
+    ))]
+async fn speech(
+    State(app): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    models::call_json(&app, &models::SPEECH, &caller, request).await
+}
+
+/// Images from a prompt with an `image-generator` model, in the OpenAI format. The call must
+/// start to answer within 90 seconds.
+#[utoipa::path(post, path = "/v1/images/generations", tag = "models",
+    request_body(content = serde_json::Value, description = "An OpenAI image generation request"),
+    responses(
+        (status = 200, description = "The upstream's answer", body = serde_json::Value),
+    ))]
+async fn image_generations(
+    State(app): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    models::call_json(&app, &models::IMAGES, &caller, request).await
 }
